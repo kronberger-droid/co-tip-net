@@ -1,0 +1,9 @@
+[package]
+name = "co-tip-net"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+burn = { version = "0.20.1", features = ["ndarray"] }
+burn-store = "0.20.1"
+image = "0.25.10"
