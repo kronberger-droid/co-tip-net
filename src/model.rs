@@ -4,10 +4,10 @@ use burn::tensor::activation::{leaky_relu, sigmoid};
 
 #[derive(Module, Debug)]
 pub struct CoTipNet<B: Backend> {
-    conv1: Conv2d<B>,
-    conv2: Conv2d<B>,
-    conv3: Conv2d<B>,
-    conv4: Conv2d<B>,
+    pub(crate) conv1: Conv2d<B>,
+    pub(crate) conv2: Conv2d<B>,
+    pub(crate) conv3: Conv2d<B>,
+    pub(crate) conv4: Conv2d<B>,
     pool: AvgPool2d,
     linear1: Linear<B>,
     linear2: Linear<B>,
