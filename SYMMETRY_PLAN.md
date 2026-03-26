@@ -15,18 +15,15 @@ the 2157-parameter CNN for CO-tip quality classification.
   - Good tips: ~0.47–0.98, Bad tips: ~0.31–0.98
   - Insight: measures mass spread, not pattern structure — symmetric bad tips score high
 
-### Next
+- [x] Rotational autocorrelation (mean Pearson r at 90°, 180°, 270°)
+  - Captures whether the pattern looks the same under rotation
+  - **Result: distributions overlap heavily, not a useful classifier alone**
+  - Good tips: mean rot_corr ≈ 0.525, Bad tips: mean rot_corr ≈ 0.537
 
-- [ ] **Rotational autocorrelation**
-  - Correlate 16×16 grid with its 90°, 180°, 270° rotations
-  - Average the Pearson correlation coefficients
-  - Captures whether the pattern *looks the same* under rotation (not just mass distribution)
-  - Implementation: rotate grid (transpose + reverse rows), then correlate
-
-- [ ] **Combine metrics + visualize**
-  - Output CSV with columns: `label, eigen_ratio, rot_corr`
-  - Plot in Typst/lilaq: histograms per metric colored by class, and a 2D scatter (eigen_ratio vs rot_corr)
-  - Visually assess separability
+- [x] Combined 2D scatter (eigen_ratio vs rot_corr)
+  - Output: `symmetry_results.csv`, plot: `symmetry_scatter.typ`
+  - **Result: classes completely interleaved, no separable decision boundary**
+  - Conclusion: global symmetry/shape metrics do not capture what the CNN learns — tip quality depends on local intensity structure (peak sharpness, ring contrast, falloff profile), not geometric symmetry
 
 ### Future candidates (if needed)
 

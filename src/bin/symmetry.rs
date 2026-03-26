@@ -1,4 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("label,eigen_ratio,rot_corr");
     for split in ["train", "valid", "test2"] {
         for (class, label) in [("goods", 1.0), ("bads", 0.0)] {
             let dir = format!("datasets/co/{split}/{class}");
@@ -7,7 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let image_flat = load_normal_image(&path);
                 let image_grid = to_grid(&image_flat);
                 let inertia_eigenvalue = inertia_eigenvalue(image_grid);
-                println!("{label}, {inertia_eigenvalue}");
+                let rot_autocorrelation = rot_autocorrelation(&image_grid);
+                println!("{label},{inertia_eigenvalue},{rot_autocorrelation}");
             }
         }
     }
@@ -61,8 +63,43 @@ fn load_normal_image(path: &std::path::Path) -> Vec<f32> {
 
     let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
     let mean = pixels.iter().sum::<f32>() / pixels.len() as f32;
-    let std = (pixels.iter().map(|x| (x - mean).powi(2)).sum::<f32>()
-        / pixels.len() as f32)
-        .sqrt();
+    let std = (pixels.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / pixels.len() as f32).sqrt();
     pixels.iter().map(|x| (x - mean) / std).collect()
+}
+
+fn rotate_90(grid: &[[f32; 16]; 16]) -> [[f32; 16]; 16] {
+    let mut rotated = [[0.0; 16]; 16];
+    #[allow(clippy::needless_range_loop)]
+    for r in 0..16 {
+        for c in 0..16 {
+            rotated[c][15 - r] = grid[r][c];
+        }
+    }
+    rotated
+}
+
+fn pearson(a: &[[f32; 16]; 16], b: &[[f32; 16]; 16]) -> f32 {
+    // Images are already standardized (mean≈0), so:
+    // r = Σ(a*b) / sqrt(Σa² · Σb²)
+    let mut sum_ab = 0.0;
+    let mut sum_aa = 0.0;
+    let mut sum_bb = 0.0;
+    for r in 0..16 {
+        for c in 0..16 {
+            sum_ab += a[r][c] * b[r][c];
+            sum_aa += a[r][c] * a[r][c];
+            sum_bb += b[r][c] * b[r][c];
+        }
+    }
+    sum_ab / (sum_aa.sqrt() * sum_bb.sqrt())
+}
+
+fn rot_autocorrelation(grid: &[[f32; 16]; 16]) -> f32 {
+    let mut rotated = *grid;
+    let mut sum = 0.0;
+    for _ in 0..3 {
+        rotated = rotate_90(&rotated);
+        sum += pearson(&rotated, grid);
+    }
+    sum / 3.0
 }
