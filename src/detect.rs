@@ -39,17 +39,6 @@ pub fn level_line_median(pixels: &[f32], width: usize, _height: usize) -> Vec<f3
 ///
 /// Returns a contrast map of the same dimensions.
 pub fn local_contrast(leveled: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
-    // TODO: Implement local contrast computation.
-    //
-    // For each pixel (x, y) not within `radius` of the border:
-    //   1. Compute the mean of all pixels in the square neighborhood
-    //      from (x-radius, y-radius) to (x+radius, y+radius)
-    //   2. contrast[y * width + x] = |pixel - neighborhood_mean|
-    //
-    // For border pixels, set contrast to 0.0 (we can't crop there anyway).
-    //
-    // This catches both bright-on-dark (STM bumps) and dark-on-bright
-    // (AFM rings) features equally.
     let mut contrast = vec![0.0_f32; width * height];
 
     for y in radius..height - radius {
@@ -75,7 +64,14 @@ pub fn local_contrast(leveled: &[f32], width: usize, height: usize, radius: usiz
 /// - 0.0 = completely directional (step edge or lattice row)
 ///
 /// `radius` is how far along each cross-section to sample.
-fn isotropy(leveled: &[f32], width: usize, height: usize, cx: usize, cy: usize, radius: usize) -> f32 {
+fn isotropy(
+    leveled: &[f32],
+    width: usize,
+    height: usize,
+    cx: usize,
+    cy: usize,
+    radius: usize,
+) -> f32 {
     // Bounds check
     if cx < radius || cy < radius || cx + radius >= width || cy + radius >= height {
         return 0.0;
@@ -267,7 +263,15 @@ pub fn extract_defects(
     let contrast = local_contrast(&leveled, w, h, contrast_radius);
 
     // Find peaks (with isotropy filter)
-    let peaks = find_peaks(&contrast, &leveled, w, h, min_contrast, crop_size, min_isotropy);
+    let peaks = find_peaks(
+        &contrast,
+        &leveled,
+        w,
+        h,
+        min_contrast,
+        crop_size,
+        min_isotropy,
+    );
 
     // Refine centers and reject non-point-like features
     let max_shift = crop_size as f32 / 4.0;
