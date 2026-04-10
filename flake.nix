@@ -3,72 +3,37 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    flake-utils,
-    rust-overlay,
-    ...
-  }:
-    flake-utils.lib.eachDefaultSystem (
-      system: let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [rust-overlay.overlays.default];
-        };
-
-        # Rust toolchain
-        rustTools = {
-          stable = pkgs.rust-bin.stable."1.89.0".default.override {
-            extensions = ["rust-src"];
-          };
-          analyzer = pkgs.rust-bin.stable."1.89.0".rust-analyzer;
-        };
-
-        # Python environment for weight conversion (H5 → PT)
-        pythonEnv = pkgs.python3.withPackages (ps: [
-          ps.h5py
-          ps.torch
-          ps.numpy
-        ]);
-
-        devTools = with pkgs; [
-          cargo-expand
-          pkg-config
+  outputs = {nixpkgs, fenix, ...}: let
+    forAllSystems = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"];
+  in {
+    devShells = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+      toolchain = fenix.packages.${system}.stable.withComponents [
+        "cargo" "clippy" "rust-src" "rustc" "rustfmt"
+      ];
+    in {
+      default = pkgs.mkShell {
+        nativeBuildInputs = [
+          toolchain
+          fenix.packages.${system}.rust-analyzer
+          pkgs.pkg-config
+          pkgs.cargo-expand
         ];
+      };
 
-        rustDeps =
-          [
-            rustTools.stable
-            rustTools.analyzer
-          ]
-          ++ devTools;
-      in {
-        # Rust development + inference
-        devShells.default = pkgs.mkShell {
-          name = "co-tip-net";
-          buildInputs = rustDeps;
-          shellHook = ''
-            echo "Using Rust toolchain: $(rustc --version)"
-            export CARGO_HOME="$HOME/.cargo"
-            export RUSTUP_HOME="$HOME/.rustup"
-            mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
-          '';
-        };
-
-        # Python environment for H5 → PT weight conversion
-        devShells.convert = pkgs.mkShell {
-          name = "co-tip-net-convert";
-          buildInputs = [pythonEnv pkgs.ruff];
-          shellHook = ''
-            echo "Python: $(python3 --version)"
-            echo "Use: python convert_weights.py"
-          '';
-        };
-      }
-    );
+      # Python environment for H5 → PT weight conversion
+      convert = pkgs.mkShell {
+        nativeBuildInputs = [
+          (pkgs.python3.withPackages (ps: [ps.h5py ps.torch ps.numpy]))
+          pkgs.ruff
+        ];
+      };
+    });
+  };
 }
