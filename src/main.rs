@@ -64,6 +64,10 @@ enum Command {
         /// Minimum isotropy ratio (0.0–1.0). Higher = stricter circular shape filter.
         #[arg(long, default_value_t = 0.3)]
         min_isotropy: f32,
+
+        /// Save intermediate debug images (leveled, contrast map) to output dir.
+        #[arg(long, default_value_t = false)]
+        debug: bool,
     },
 
     /// Train a new model or fine-tune from pretrained weights
@@ -122,6 +126,7 @@ fn main() {
             contrast_radius,
             min_contrast,
             min_isotropy,
+            debug,
         } => {
             let image = image::open(&input)
                 .unwrap_or_else(|e| panic!("Failed to open {}: {e}", input.display()))
@@ -133,6 +138,7 @@ fn main() {
                 min_contrast,
                 min_isotropy,
                 &output,
+                debug,
             );
         }
 

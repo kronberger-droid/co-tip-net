@@ -2,6 +2,26 @@ use std::path::Path;
 
 use image::GrayImage;
 
+/// Save an f32 buffer as a grayscale PNG, rescaling to [0, 255].
+fn save_debug_image(data: &[f32], width: usize, height: usize, path: &Path) {
+    let min = data.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+
+    let pixels: Vec<u8> = if range < 1e-9 {
+        vec![128u8; data.len()]
+    } else {
+        data.iter()
+            .map(|&v| ((v - min) / range * 255.0) as u8)
+            .collect()
+    };
+
+    let img = GrayImage::from_raw(width as u32, height as u32, pixels)
+        .expect("Failed to create debug image");
+    img.save(path)
+        .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
+}
+
 /// A detected defect position in pixel coordinates.
 #[derive(Debug, Clone)]
 pub struct Defect {
@@ -31,11 +51,92 @@ pub fn level_line_median(pixels: &[f32], width: usize, _height: usize) -> Vec<f3
     result
 }
 
+/// Level a grayscale image by subtracting a 2D Gaussian-blurred background.
+///
+/// Unlike row-wise median, this handles diagonal structures (oxide rows)
+/// without creating horizontal streaking artifacts. The blur radius should be
+/// much larger than the features of interest (e.g. 3–5× the defect size).
+///
+/// Uses separable box-blur iterated 3 times to approximate a Gaussian.
+pub fn level_gaussian_bg(pixels: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+    let mut bg = pixels.to_vec();
+    for _ in 0..3 {
+        bg = box_blur_h(&bg, width, height, radius);
+        bg = box_blur_v(&bg, width, height, radius);
+    }
+
+    pixels
+        .iter()
+        .zip(bg.iter())
+        .map(|(&p, &b)| p - b)
+        .collect()
+}
+
+/// Horizontal box blur (1D, per row).
+fn box_blur_h(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+    let mut dst = vec![0.0_f32; width * height];
+    let diam = 2 * radius + 1;
+
+    for y in 0..height {
+        let row_start = y * width;
+
+        let mut sum = 0.0_f32;
+        for x in 0..radius.min(width) {
+            sum += src[row_start + x];
+        }
+        sum += src[row_start] * (radius + 1).min(diam) as f32;
+
+        for x in 0..width {
+            let right = (x + radius).min(width - 1);
+            sum += src[row_start + right];
+
+            if x > radius {
+                let left = (x as isize - radius as isize - 1).max(0) as usize;
+                sum -= src[row_start + left];
+            } else {
+                sum -= src[row_start];
+            }
+
+            dst[row_start + x] = sum / diam as f32;
+        }
+    }
+    dst
+}
+
+/// Vertical box blur (1D, per column).
+fn box_blur_v(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+    let mut dst = vec![0.0_f32; width * height];
+    let diam = 2 * radius + 1;
+
+    for x in 0..width {
+        let mut sum = 0.0_f32;
+        for y in 0..radius.min(height) {
+            sum += src[y * width + x];
+        }
+        sum += src[x] * (radius + 1).min(diam) as f32;
+
+        for y in 0..height {
+            let bottom = (y + radius).min(height - 1);
+            sum += src[bottom * width + x];
+
+            if y > radius {
+                let top = (y as isize - radius as isize - 1).max(0) as usize;
+                sum -= src[top * width + x];
+            } else {
+                sum -= src[x];
+            }
+
+            dst[y * width + x] = sum / diam as f32;
+        }
+    }
+    dst
+}
+
 /// Compute local contrast map: for each pixel, the absolute difference
 /// from its neighborhood mean.
 ///
 /// `radius` defines the neighborhood: a (2*radius+1) × (2*radius+1) square.
-/// Pixels near the border (within `radius` of the edge) should be set to 0.0.
+/// Pixels near the border (within `radius` of the edge) are set to 0.0.
 ///
 /// Returns a contrast map of the same dimensions.
 pub fn local_contrast(leveled: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
@@ -57,14 +158,18 @@ pub fn local_contrast(leveled: &[f32], width: usize, height: usize, radius: usiz
     contrast
 }
 
-/// Compute the isotropy ratio at a point: how circular vs directional the
-/// local contrast is. Returns min(var_h, var_v) / max(var_h, var_v).
+/// Compute the "blobness" of a local region using the structure tensor.
 ///
-/// - 1.0 = perfectly isotropic (circular defect)
-/// - 0.0 = completely directional (step edge or lattice row)
+/// The structure tensor accumulates gradient outer products over a window,
+/// yielding a 2×2 matrix whose eigenvalues characterise the local geometry:
+/// - Both eigenvalues large and similar → isotropic blob (point defect)
+/// - One large, one small → ridge / edge (CuO row, step edge)
+/// - Both small → flat region
 ///
-/// `radius` is how far along each cross-section to sample.
-fn isotropy(
+/// Returns `λ_min / λ_max` ∈ [0, 1]:
+/// - Close to 1.0 → point-like feature
+/// - Close to 0.0 → directional feature (ridge / edge)
+fn blobness(
     leveled: &[f32],
     width: usize,
     height: usize,
@@ -72,45 +177,70 @@ fn isotropy(
     cy: usize,
     radius: usize,
 ) -> f32 {
-    // Bounds check
-    if cx < radius || cy < radius || cx + radius >= width || cy + radius >= height {
+    if cx < radius + 1
+        || cy < radius + 1
+        || cx + radius + 1 >= width
+        || cy + radius + 1 >= height
+    {
         return 0.0;
     }
 
-    // Horizontal cross-section: pixels at (cx-radius..=cx+radius, cy)
-    let h_slice: Vec<f32> = (cx - radius..=cx + radius)
-        .map(|x| leveled[cy * width + x])
-        .collect();
+    let sigma = radius as f32 / 2.0;
+    let sigma2 = 2.0 * sigma * sigma;
 
-    // Vertical cross-section: pixels at (cx, cy-radius..=cy+radius)
-    let v_slice: Vec<f32> = (cy - radius..=cy + radius)
-        .map(|y| leveled[y * width + cx])
-        .collect();
+    let mut s_xx = 0.0_f32;
+    let mut s_yy = 0.0_f32;
+    let mut s_xy = 0.0_f32;
+    let mut w_sum = 0.0_f32;
 
-    let var_h = variance(&h_slice);
-    let var_v = variance(&v_slice);
+    for dy in -(radius as isize)..=(radius as isize) {
+        for dx in -(radius as isize)..=(radius as isize) {
+            let x = (cx as isize + dx) as usize;
+            let y = (cy as isize + dy) as usize;
 
-    let max = var_h.max(var_v);
-    if max < 1e-9 {
-        return 0.0; // flat region, not a defect
+            let ix = (leveled[y * width + x + 1] - leveled[y * width + x - 1]) / 2.0;
+            let iy = (leveled[(y + 1) * width + x] - leveled[(y - 1) * width + x]) / 2.0;
+
+            let r2 = (dx * dx + dy * dy) as f32;
+            let w = (-r2 / sigma2).exp();
+
+            s_xx += w * ix * ix;
+            s_yy += w * iy * iy;
+            s_xy += w * ix * iy;
+            w_sum += w;
+        }
     }
-    var_h.min(var_v) / max
-}
 
-fn variance(values: &[f32]) -> f32 {
-    let n = values.len() as f32;
-    let mean = values.iter().sum::<f32>() / n;
-    values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n
+    s_xx /= w_sum;
+    s_yy /= w_sum;
+    s_xy /= w_sum;
+
+    let trace = s_xx + s_yy;
+    let det = s_xx * s_yy - s_xy * s_xy;
+
+    if trace < 1e-9 {
+        return 0.0;
+    }
+
+    let disc = (trace * trace - 4.0 * det).max(0.0).sqrt();
+    let lambda_min = (trace - disc) / 2.0;
+    let lambda_max = (trace + disc) / 2.0;
+
+    if lambda_max < 1e-9 {
+        return 0.0;
+    }
+
+    lambda_min / lambda_max
 }
 
 /// Find local maxima in the contrast map above a threshold,
-/// filter by isotropy (rejects step edges and lattice rows),
+/// filter by blobness (rejects step edges, ridges, and lattice rows),
 /// then apply non-maximum suppression to avoid overlapping detections.
 ///
 /// `min_contrast`: minimum contrast value to consider
 /// `min_distance`: minimum pixel distance between two detections
-/// `leveled`: the leveled image data (for isotropy computation)
-/// `min_isotropy`: minimum isotropy ratio (0.0–1.0), e.g. 0.3
+/// `leveled`: the leveled image data (for blobness computation)
+/// `min_isotropy`: minimum blobness ratio (0.0–1.0), e.g. 0.3
 pub fn find_peaks(
     contrast: &[f32],
     leveled: &[f32],
@@ -120,22 +250,32 @@ pub fn find_peaks(
     min_distance: u32,
     min_isotropy: f32,
 ) -> Vec<Defect> {
-    let iso_radius = (min_distance / 2) as usize;
+    let blob_radius = (min_distance / 2) as usize;
 
-    // Collect all pixels above threshold
+    let local_r = 2_usize; // 5×5 neighborhood for local max check
     let mut candidates: Vec<Defect> = Vec::new();
-    for y in 0..height {
-        for x in 0..width {
+    for y in local_r..height.saturating_sub(local_r) {
+        for x in local_r..width.saturating_sub(local_r) {
             let c = contrast[y * width + x];
-            if c >= min_contrast {
-                let iso = isotropy(leveled, width, height, x, y, iso_radius);
-                if iso >= min_isotropy {
-                    candidates.push(Defect {
-                        x: x as u32,
-                        y: y as u32,
-                        contrast: c,
-                    });
-                }
+            if c < min_contrast {
+                continue;
+            }
+
+            let is_local_max = (y - local_r..=y + local_r).all(|ny| {
+                (x - local_r..=x + local_r)
+                    .all(|nx| (ny == y && nx == x) || contrast[ny * width + nx] <= c)
+            });
+            if !is_local_max {
+                continue;
+            }
+
+            let blob = blobness(leveled, width, height, x, y, blob_radius);
+            if blob >= min_isotropy {
+                candidates.push(Defect {
+                    x: x as u32,
+                    y: y as u32,
+                    contrast: c,
+                });
             }
         }
     }
@@ -157,6 +297,60 @@ pub fn find_peaks(
     }
 
     kept
+}
+
+/// Measure how concentrated the *depression* signal is around the center.
+///
+/// Only counts negative leveled values (the actual depression), ignoring
+/// positive values (bright ring in oxide-tip images, lattice bright spots).
+/// This way oxide-tip ring defects pass (depression is at center) and
+/// Cu-tip diffuse depressions also pass (depression is still centered,
+/// just broader), while lattice patterns fail (negative values are spread
+/// uniformly across the patch).
+///
+/// Returns fraction of total negative intensity within inner half-radius.
+fn depression_concentration(
+    leveled: &[f32],
+    width: usize,
+    height: usize,
+    cx: usize,
+    cy: usize,
+    radius: usize,
+) -> f32 {
+    let r = radius as isize;
+    let inner_r2 = (radius as f32 / 2.0).powi(2);
+    let outer_r2 = (radius as f32).powi(2);
+
+    let mut inner_sum = 0.0_f32;
+    let mut total_sum = 0.0_f32;
+
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let px = cx as isize + dx;
+            let py = cy as isize + dy;
+            if px < 0 || py < 0 || px >= width as isize || py >= height as isize {
+                continue;
+            }
+            let dist2 = (dx * dx + dy * dy) as f32;
+            if dist2 > outer_r2 {
+                continue;
+            }
+            let val = leveled[py as usize * width + px as usize];
+            if val >= 0.0 {
+                continue; // only count depressions
+            }
+            let neg = -val; // make positive for summing
+            total_sum += neg;
+            if dist2 <= inner_r2 {
+                inner_sum += neg;
+            }
+        }
+    }
+
+    if total_sum < 1e-9 {
+        return 0.0;
+    }
+    inner_sum / total_sum
 }
 
 /// Refine a defect position to the center of mass of |leveled| values
@@ -202,11 +396,17 @@ fn refine_center(
     (new_x, new_y, shift)
 }
 
-/// Crop square patches around detected defects and save as PNGs.
+/// Crop square patches around detected defects from the original image
+/// and save as grayscale PNGs (no normalisation — the classifier handles that).
 ///
-/// `crop_size`: side length of the square crop (in pixels of the original image)
+/// `crop_size`: side length of the square crop (in pixels)
 /// Defects too close to the image border (where a full crop can't fit) are skipped.
-pub fn crop_and_save(image: &GrayImage, defects: &[Defect], crop_size: u32, output_dir: &Path) {
+pub fn crop_and_save(
+    image: &GrayImage,
+    defects: &[Defect],
+    crop_size: u32,
+    output_dir: &Path,
+) {
     let half = crop_size / 2;
     let (img_w, img_h) = image.dimensions();
 
@@ -214,7 +414,6 @@ pub fn crop_and_save(image: &GrayImage, defects: &[Defect], crop_size: u32, outp
 
     let mut saved = 0;
     for defect in defects {
-        // Skip if crop would go out of bounds
         if defect.x < half
             || defect.y < half
             || defect.x + half >= img_w
@@ -242,6 +441,11 @@ pub fn crop_and_save(image: &GrayImage, defects: &[Defect], crop_size: u32, outp
 }
 
 /// Full extraction pipeline: level → detect → crop.
+///
+/// If `debug` is true, saves intermediate images to `output_dir`:
+/// - `debug_line_leveled.png`: after row-wise median subtraction
+/// - `debug_leveled.png`: after Gaussian background subtraction
+/// - `debug_contrast.png`: local contrast map
 pub fn extract_defects(
     image: &GrayImage,
     crop_size: u32,
@@ -249,6 +453,7 @@ pub fn extract_defects(
     min_contrast: f32,
     min_isotropy: f32,
     output_dir: &Path,
+    debug: bool,
 ) {
     let (width, height) = image.dimensions();
     let (w, h) = (width as usize, height as usize);
@@ -256,13 +461,27 @@ pub fn extract_defects(
     // Convert to f32
     let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
 
-    // Level
-    let leveled = level_line_median(&pixels, w, h);
+    // Step 1: row-wise median to remove scan-line offsets
+    let line_leveled = level_line_median(&pixels, w, h);
+
+    // Step 2: 2D Gaussian background subtraction for detection only.
+    //         Removes slow gradients without the streaking that row-median
+    //         creates near oxide regions.
+    let bg_radius = contrast_radius * 3;
+    let leveled = level_gaussian_bg(&line_leveled, w, h, bg_radius);
 
     // Compute contrast map
     let contrast = local_contrast(&leveled, w, h, contrast_radius);
 
-    // Find peaks (with isotropy filter)
+    if debug {
+        std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
+        save_debug_image(&line_leveled, w, h, &output_dir.join("debug_line_leveled.png"));
+        save_debug_image(&leveled, w, h, &output_dir.join("debug_leveled.png"));
+        save_debug_image(&contrast, w, h, &output_dir.join("debug_contrast.png"));
+        println!("Saved debug images to {}", output_dir.display());
+    }
+
+    // Find peaks (with structure tensor blobness filter)
     let peaks = find_peaks(
         &contrast,
         &leveled,
@@ -273,31 +492,80 @@ pub fn extract_defects(
         min_isotropy,
     );
 
-    // Refine centers and reject non-point-like features
+    if debug {
+        println!("Peaks after blobness filter: {}", peaks.len());
+    }
+
+    // Refine centers and apply lightweight filters
     let max_shift = crop_size as f32 / 4.0;
+    let half = (crop_size / 2) as usize;
+    let min_depression_conc = 0.35; // depression signal must be ≥35% concentrated in inner half
+
+    let mut reject_shift = 0;
+    let mut reject_bright = 0;
+    let mut reject_conc = 0;
+
     let defects: Vec<Defect> = peaks
         .into_iter()
         .filter_map(|d| {
             let (nx, ny, shift) = refine_center(&leveled, w, h, d.x, d.y, crop_size / 2);
-            if shift <= max_shift {
-                Some(Defect {
-                    x: nx,
-                    y: ny,
-                    contrast: d.contrast,
-                })
-            } else {
-                None
+            if shift > max_shift {
+                reject_shift += 1;
+                return None;
             }
+
+            let cx = nx as usize;
+            let cy = ny as usize;
+
+            // Reject bright protrusions — CO molecules appear as dark depressions
+            if leveled[cy * w + cx] > 0.0 {
+                reject_bright += 1;
+                return None;
+            }
+
+            // Reject patches where depression signal is spread evenly (lattice)
+            let conc = depression_concentration(&leveled, w, h, cx, cy, half);
+            if conc < min_depression_conc {
+                reject_conc += 1;
+                return None;
+            }
+
+            Some(Defect {
+                x: nx,
+                y: ny,
+                contrast: d.contrast,
+            })
         })
         .collect();
+
+    if debug {
+        println!(
+            "Rejected: shift={reject_shift} bright={reject_bright} depression_conc={reject_conc}"
+        );
+        println!("After filters: {}", defects.len());
+    }
+
+    // Post-refinement NMS: center refinement can cause initially-distant
+    // peaks to converge onto the same defect, creating duplicates.
+    let mut final_defects: Vec<Defect> = Vec::new();
+    for d in defects {
+        let dominated = final_defects.iter().any(|existing| {
+            let dx = d.x as f32 - existing.x as f32;
+            let dy = d.y as f32 - existing.y as f32;
+            (dx * dx + dy * dy).sqrt() < crop_size as f32
+        });
+        if !dominated {
+            final_defects.push(d);
+        }
+    }
 
     println!(
         "Image {}x{}: found {} defects",
         width,
         height,
-        defects.len()
+        final_defects.len()
     );
 
-    // Crop and save
-    crop_and_save(image, &defects, crop_size, output_dir);
+    // Crop from original image — the classifier does its own normalisation
+    crop_and_save(image, &final_defects, crop_size, output_dir);
 }

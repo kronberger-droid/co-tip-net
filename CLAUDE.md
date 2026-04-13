@@ -1,14 +1,17 @@
 # co-tip-net
 
-Burn (Rust deep learning framework) inference pipeline for a pretrained CO-tip quality classifier used in automated AFM tip preparation.
+Burn (Rust deep learning framework) inference pipeline for a pretrained CO-tip
+quality classifier used in automated AFM tip preparation.
 
 ## Goal
 
-Reimplement the inference path of a Keras/TF 1.12 CNN in Rust using **Burn** with the **LibTorch (`tch`)** backend. The original project lives in `../Auto-CO-AFM/`.
+Reimplement the inference path of a Keras/TF 1.12 CNN in Rust using **Burn**
+with the **LibTorch (`tch`)** backend.
+The original project lives in `../Auto-CO-AFM/`.
 
 ## Model architecture (2 157 params, binary classifier)
 
-```
+```text
 Input: (batch, 1, 16, 16)  — single-channel grayscale, channels-first
 
 Conv2d(1→4, 3×3, valid)  → LeakyReLU(α=0.1)
@@ -33,6 +36,7 @@ Burn cannot read HDF5 directly.
 **Conversion path:** H5 → PyTorch state_dict `.pt` → Burn `PyTorchFileRecorder`
 
 Write a Python helper script (`convert_weights.py`) that:
+
 1. Reads the H5 with `h5py` (no TF dependency needed)
 2. Transposes conv kernels: Keras `(H,W,Cin,Cout)` → PyTorch `(Cout,Cin,H,W)`
 3. Transposes dense kernels: Keras `(in,out)` → PyTorch `(out,in)`
@@ -58,7 +62,7 @@ The H5 also stores optimizer state (Adam) and full model/training config as root
 
 ## Project layout
 
-```
+```text
 src/
   main.rs      — CLI entry: parse args, load image(s), run inference, print result
   model.rs     — #[derive(Module)] CoTipNet + CoTipNetConfig, forward()
