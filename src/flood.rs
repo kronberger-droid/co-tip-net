@@ -61,10 +61,11 @@ pub enum RegionClass {
     CloseToEdge,
     StepEdge,
     NotRound,
+    Crowded,
 }
 
 impl RegionClass {
-    pub(crate) const ALL: [RegionClass; 7] = [
+    pub(crate) const ALL: [RegionClass; 8] = [
         RegionClass::Valid,
         RegionClass::TooSmall,
         RegionClass::TooLarge,
@@ -72,6 +73,7 @@ impl RegionClass {
         RegionClass::CloseToEdge,
         RegionClass::StepEdge,
         RegionClass::NotRound,
+        RegionClass::Crowded,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -83,6 +85,7 @@ impl RegionClass {
             RegionClass::CloseToEdge => "close to edge",
             RegionClass::StepEdge => "step edge",
             RegionClass::NotRound => "not round",
+            RegionClass::Crowded => "crowded",
         }
     }
 
@@ -96,6 +99,7 @@ impl RegionClass {
             RegionClass::CloseToEdge => [240, 150, 30],
             RegionClass::StepEdge => [230, 220, 40],
             RegionClass::NotRound => [255, 120, 170],
+            RegionClass::Crowded => [150, 110, 230],
         }
     }
 }

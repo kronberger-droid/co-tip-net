@@ -32,6 +32,9 @@ pub struct DohParams {
     pub step_level: f32,
     /// Minimum [`radial_symmetry`] for a valid blob.
     pub min_symmetry: f32,
+    /// Neighbors of similar strength within half a crop that make a blob
+    /// part of a lattice rather than an isolated CO.
+    pub max_neighbors: usize,
     /// Smallest blob σ accepted as a CO (pixels).
     pub min_sigma: f32,
     /// Largest blob σ accepted as a CO (pixels).
@@ -328,13 +331,43 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
         leveled,
         sigma: noise,
         ladder,
-        keypoints: suppress_duplicates(keypoints),
+        keypoints: suppress_duplicates(mark_crowded(keypoints, params)),
         step_mask: mask,
     }
 }
 
 /// Drop weaker valid keypoints within 2σ of a stronger one, which can occur
 /// on flat-bottomed blobs where neighboring pixels tie.
+/// A CO on the bare terrace stands alone; a spot of an atomically resolved
+/// oxide row has neighbors of similar strength at the lattice spacing. A
+/// valid keypoint with `max_neighbors` or more others within half a crop
+/// and at least half its strength is reclassified as crowded. All
+/// keypoints above threshold count as neighbors, whatever their class.
+fn mark_crowded(mut keypoints: Vec<Keypoint>, params: &DohParams) -> Vec<Keypoint> {
+    let reach = (params.crop_size / 2) as f32;
+    let crowded: Vec<bool> = keypoints
+        .iter()
+        .map(|k| {
+            k.class == RegionClass::Valid
+                && keypoints
+                    .iter()
+                    .filter(|o| {
+                        let (dx, dy) = (o.x as f32 - k.x as f32, o.y as f32 - k.y as f32);
+                        let d = (dx * dx + dy * dy).sqrt();
+                        d > 1.5 && d < reach && o.strength >= 0.5 * k.strength
+                    })
+                    .count()
+                    >= params.max_neighbors
+        })
+        .collect();
+    for (k, c) in keypoints.iter_mut().zip(crowded) {
+        if c {
+            k.class = RegionClass::Crowded;
+        }
+    }
+    keypoints
+}
+
 fn suppress_duplicates(mut keypoints: Vec<Keypoint>) -> Vec<Keypoint> {
     keypoints.sort_by(|a, b| b.strength.total_cmp(&a.strength));
     let mut kept: Vec<Keypoint> = Vec::new();
@@ -541,6 +574,7 @@ mod tests {
             bg_radius: CROP as usize,
             step_level: 6.0,
             min_symmetry: 0.0,
+            max_neighbors: usize::MAX,
             min_sigma: DohParams::default_min_sigma(CROP),
             max_sigma: DohParams::default_max_sigma(CROP),
             num_scales: 6,

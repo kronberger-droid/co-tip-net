@@ -126,6 +126,11 @@ enum Command {
         #[arg(long, default_value_t = 0.4)]
         min_symmetry: f32,
 
+        /// [doh] Reject a blob with this many neighbors of at least half its
+        /// strength within half a crop (lattice spots, not isolated COs)
+        #[arg(long, default_value_t = 2)]
+        max_neighbors: usize,
+
         /// [doh] Number of scales between min and max σ
         #[arg(long, default_value_t = 6)]
         num_scales: usize,
@@ -225,6 +230,7 @@ fn main() {
             max_sigma,
             num_scales,
             min_symmetry,
+            max_neighbors,
             debug,
         } => {
             let loaded = scan::Scan::open(&input, nm_per_px, max_upsample).unwrap_or_else(|e| {
@@ -289,6 +295,7 @@ fn main() {
                             level_sigma: doh_level,
                             min_isotropy,
                             min_symmetry,
+                            max_neighbors,
                         };
                         doh::extract_defects_doh(&scan, &params, &output, &prefix, debug);
                     }
