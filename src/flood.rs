@@ -103,13 +103,22 @@ pub struct Region {
 
 /// Robust noise estimate: `1.4826 · MAD`, which equals σ for Gaussian noise
 /// and is insensitive to the sparse depressions we are looking for.
+///
+/// Falls back to the standard deviation when the MAD is zero, which happens
+/// on 8-bit scans where more than half the pixels share one value. A zero
+/// threshold would otherwise accept every flat plateau.
 pub fn robust_sigma(data: &[f32]) -> f32 {
     let mut buf = data.to_vec();
     let median = median_in_place(&mut buf);
     for v in buf.iter_mut() {
         *v = (*v - median).abs();
     }
-    1.4826 * median_in_place(&mut buf)
+    let mad = 1.4826 * median_in_place(&mut buf);
+    if mad > 1e-6 {
+        return mad;
+    }
+    let mean = data.iter().sum::<f32>() / data.len() as f32;
+    (data.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / data.len() as f32).sqrt()
 }
 
 fn median_in_place(buf: &mut [f32]) -> f32 {
@@ -506,6 +515,16 @@ mod tests {
         }
         let dirty = robust_sigma(&data);
         assert!((dirty - clean).abs() / clean < 0.1, "{clean} vs {dirty}");
+    }
+
+    #[test]
+    fn robust_sigma_falls_back_when_mad_is_zero() {
+        // Mostly flat with a few outliers, as on a clipped 8-bit scan.
+        let mut data = vec![128.0_f32; 1000];
+        for v in data.iter_mut().take(100) {
+            *v = 100.0;
+        }
+        assert!(robust_sigma(&data) > 1.0);
     }
 
     #[test]
