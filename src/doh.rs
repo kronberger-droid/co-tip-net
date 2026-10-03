@@ -15,15 +15,26 @@
 
 use std::path::Path;
 
-use image::{GrayImage, Rgb, RgbImage};
+use image::{Rgb, RgbImage};
 
-use crate::detect::{Defect, crop_and_save, level_gaussian_bg, level_line_median};
-use crate::flood::{RegionClass, robust_sigma};
+use crate::detect::{Defect, crop_and_save, level_line_median, level_robust_bg};
+use crate::flood::RegionClass;
+use crate::scan::Scan;
+use crate::steps::{step_mask, unmasked_sigma};
 
 /// Parameters for DoH extraction.
 pub struct DohParams {
     /// Side length of the square crop around each valid blob (pixels).
     pub crop_size: u32,
+    /// Box radius of the background subtracted before detection (pixels).
+    pub bg_radius: usize,
+    /// Step-edge mask threshold in robust σ of the gradient, `<= 0` disables.
+    pub step_level: f32,
+    /// Minimum [`radial_symmetry`] for a valid blob.
+    pub min_symmetry: f32,
+    /// Neighbors of similar strength within half a crop that make a blob
+    /// part of a lattice rather than an isolated CO.
+    pub max_neighbors: usize,
     /// Smallest blob σ accepted as a CO (pixels).
     pub min_sigma: f32,
     /// Largest blob σ accepted as a CO (pixels).
@@ -41,13 +52,15 @@ pub struct DohParams {
 }
 
 impl DohParams {
-    /// σ defaults scaled to the crop size, since px/nm differs per scan.
+    /// σ defaults scaled to the crop size. At the default 40 px crop and
+    /// 30 nm / 512 px this is 2-8 px, i.e. 0.12-0.47 nm, which brackets the
+    /// CO dots (σ 1.9-7 px) on the nice Cu reference scans.
     pub fn default_min_sigma(crop_size: u32) -> f32 {
-        crop_size as f32 / 16.0
+        crop_size as f32 / 20.0
     }
 
     pub fn default_max_sigma(crop_size: u32) -> f32 {
-        crop_size as f32 / 6.0
+        crop_size as f32 / 5.0
     }
 
     /// Geometric σ ladder with one padding scale on each end.
@@ -70,7 +83,59 @@ pub struct Keypoint {
     pub strength: f32,
     /// `λ_min / λ_max` of the Hessian at the keypoint, at `min_sigma`.
     pub isotropy: f32,
+    /// Share of the variation around the keypoint explained by its radial
+    /// profile, see [`radial_symmetry`].
+    pub symmetry: f32,
     pub class: RegionClass,
+}
+
+/// How rotationally symmetric the feature at (`cx`, `cy`) is: the share of
+/// the variance within `radius` that the azimuthally averaged profile
+/// explains. A round dot scores near 1; a row fragment, a dimer or a
+/// feature with a neighbor beside it scores low, even when its curvature
+/// at the center is isotropic.
+pub fn radial_symmetry(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    cx: usize,
+    cy: usize,
+    radius: f32,
+) -> f32 {
+    let r = radius.ceil() as isize;
+    let bins = r as usize + 1;
+    let mut sum = vec![0.0_f64; bins];
+    let mut count = vec![0usize; bins];
+    let mut samples = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (x, y) = (cx as isize + dx, cy as isize + dy);
+            if x < 0 || y < 0 || x >= width as isize || y >= height as isize {
+                continue;
+            }
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d > radius {
+                continue;
+            }
+            let bin = d.round() as usize;
+            let v = data[y as usize * width + x as usize] as f64;
+            sum[bin] += v;
+            count[bin] += 1;
+            samples.push((bin, v));
+        }
+    }
+    let n = samples.len() as f64;
+    let mean = samples.iter().map(|&(_, v)| v).sum::<f64>() / n;
+    let (mut total, mut residual) = (0.0, 0.0);
+    for &(bin, v) in &samples {
+        let profile = sum[bin] / count[bin] as f64;
+        total += (v - mean).powi(2);
+        residual += (v - profile).powi(2);
+    }
+    if total <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - residual / total).max(0.0) as f32
 }
 
 /// Sampled Gaussian and its first and second derivatives, truncated at 4σ.
@@ -173,13 +238,23 @@ pub struct Detection {
     pub sigma: f32,
     pub ladder: Vec<f32>,
     pub keypoints: Vec<Keypoint>,
+    pub step_mask: Vec<bool>,
 }
 
 /// Level the raw scan, build the DoH scale space and classify its maxima.
 pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -> Detection {
     let line_leveled = level_line_median(pixels, width, height);
-    let leveled = level_gaussian_bg(&line_leveled, width, height, params.crop_size as usize);
-    let noise = robust_sigma(&leveled);
+    let leveled = level_robust_bg(&line_leveled, width, height, params.bg_radius);
+    let mask = step_mask(
+        &line_leveled,
+        width,
+        height,
+        params.step_level,
+        params.crop_size as usize,
+        params.crop_size as usize / 4,
+    );
+    // Steps would dominate the spread, thus noise comes from the rest.
+    let noise = unmasked_sigma(&leveled, &mask);
     let threshold = params.level_sigma * noise;
     let ladder = params.ladder();
 
@@ -220,13 +295,19 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
                 }
 
                 let iso = isotropy[y * width + x];
+                let sym =
+                    radial_symmetry(&leveled, width, height, x, y, (2.5 * ladder[si]).max(4.0));
                 let fits = x >= half && y >= half && x + half < width && y + half < height;
-                let class = if si == 0 {
+                let class = if mask[y * width + x] {
+                    RegionClass::StepEdge
+                } else if si == 0 {
                     RegionClass::TooSmall
                 } else if si == last {
                     RegionClass::TooLarge
                 } else if iso < params.min_isotropy {
                     RegionClass::Elongated
+                } else if sym < params.min_symmetry {
+                    RegionClass::NotRound
                 } else if !fits {
                     RegionClass::CloseToEdge
                 } else {
@@ -239,6 +320,7 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
                     sigma: ladder[si],
                     strength: v,
                     isotropy: iso,
+                    symmetry: sym,
                     class,
                 });
             }
@@ -249,12 +331,43 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
         leveled,
         sigma: noise,
         ladder,
-        keypoints: suppress_duplicates(keypoints),
+        keypoints: suppress_duplicates(mark_crowded(keypoints, params)),
+        step_mask: mask,
     }
 }
 
 /// Drop weaker valid keypoints within 2σ of a stronger one, which can occur
 /// on flat-bottomed blobs where neighboring pixels tie.
+/// A CO on the bare terrace stands alone; a spot of an atomically resolved
+/// oxide row has neighbors of similar strength at the lattice spacing. A
+/// valid keypoint with `max_neighbors` or more others within half a crop
+/// and at least half its strength is reclassified as crowded. All
+/// keypoints above threshold count as neighbors, whatever their class.
+fn mark_crowded(mut keypoints: Vec<Keypoint>, params: &DohParams) -> Vec<Keypoint> {
+    let reach = (params.crop_size / 2) as f32;
+    let crowded: Vec<bool> = keypoints
+        .iter()
+        .map(|k| {
+            k.class == RegionClass::Valid
+                && keypoints
+                    .iter()
+                    .filter(|o| {
+                        let (dx, dy) = (o.x as f32 - k.x as f32, o.y as f32 - k.y as f32);
+                        let d = (dx * dx + dy * dy).sqrt();
+                        d > 1.5 && d < reach && o.strength >= 0.5 * k.strength
+                    })
+                    .count()
+                    >= params.max_neighbors
+        })
+        .collect();
+    for (k, c) in keypoints.iter_mut().zip(crowded) {
+        if c {
+            k.class = RegionClass::Crowded;
+        }
+    }
+    keypoints
+}
+
 fn suppress_duplicates(mut keypoints: Vec<Keypoint>) -> Vec<Keypoint> {
     keypoints.sort_by(|a, b| b.strength.total_cmp(&a.strength));
     let mut kept: Vec<Keypoint> = Vec::new();
@@ -277,19 +390,16 @@ fn suppress_duplicates(mut keypoints: Vec<Keypoint>) -> Vec<Keypoint> {
 /// If `debug` is true, prints noise σ, the σ ladder, per-class counts and
 /// the scale and strength distribution of valid blobs, and saves
 /// `<prefix>_debug_doh.png`: the leveled scan with a circle of radius 2σ per
-/// keypoint, colored by class.
+/// keypoint, colored by class, and the step mask tinted yellow.
 pub fn extract_defects_doh(
-    image: &GrayImage,
+    scan: &Scan,
     params: &DohParams,
     output_dir: &Path,
     prefix: &str,
     debug: bool,
 ) {
-    let (width, height) = image.dimensions();
-    let (w, h) = (width as usize, height as usize);
-    let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
-
-    let det = detect(&pixels, w, h, params);
+    let (w, h) = (scan.width, scan.height);
+    let det = detect(&scan.data, w, h, params);
 
     let defects: Vec<Defect> = det
         .keypoints
@@ -299,6 +409,9 @@ pub fn extract_defects_doh(
             x: k.x as u32,
             y: k.y as u32,
             contrast: k.strength,
+            size: k.sigma,
+            isotropy: k.isotropy,
+            symmetry: k.symmetry,
         })
         .collect();
 
@@ -306,20 +419,24 @@ pub fn extract_defects_doh(
         print_debug_stats(&det, params);
         std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
         let path = output_dir.join(format!("{prefix}_debug_doh.png"));
-        render_overlay(&det, w, h)
+        render_overlay(&det, w, h, scan.sign)
             .save(&path)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
         println!("Saved {}", path.display());
     }
 
-    println!(
-        "Image {}x{}: found {} defects",
-        width,
-        height,
-        defects.len()
-    );
+    println!("Image {w}x{h}: found {} defects", defects.len());
 
-    crop_and_save(image, &defects, params.crop_size, output_dir, prefix);
+    crop_and_save(
+        &det.leveled,
+        w,
+        h,
+        &defects,
+        params.crop_size,
+        output_dir,
+        prefix,
+        scan.sign,
+    );
 }
 
 fn print_debug_stats(det: &Detection, params: &DohParams) {
@@ -369,9 +486,13 @@ fn print_debug_stats(det: &Detection, params: &DohParams) {
         "Valid isotropy: {}",
         quantiles(valid.iter().map(|k| k.isotropy).collect())
     );
+    println!(
+        "Valid symmetry: {}",
+        quantiles(valid.iter().map(|k| k.symmetry).collect())
+    );
 }
 
-fn render_overlay(det: &Detection, width: usize, height: usize) -> RgbImage {
+fn render_overlay(det: &Detection, width: usize, height: usize, sign: f32) -> RgbImage {
     let min = det.leveled.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = det
         .leveled
@@ -383,10 +504,22 @@ fn render_overlay(det: &Detection, width: usize, height: usize) -> RgbImage {
     let mut img = RgbImage::from_fn(width as u32, height as u32, |x, y| {
         let v = det.leveled[y as usize * width + x as usize];
         let g = ((v - min) / range * 255.0) as u8;
-        Rgb([g, g, g])
+        // Show an inverted scan with its real contrast.
+        let g = if sign < 0.0 { 255 - g } else { g };
+        if det.step_mask[y as usize * width + x as usize] {
+            // Tint the mask instead of drawing its many keypoints.
+            let [r, gr, b] = RegionClass::StepEdge.color();
+            let mix = |c: u8| ((g as u16 + c as u16) / 2) as u8;
+            Rgb([mix(r), mix(gr), mix(b)])
+        } else {
+            Rgb([g, g, g])
+        }
     });
 
     for kp in &det.keypoints {
+        if kp.class == RegionClass::StepEdge {
+            continue;
+        }
         let color = Rgb(kp.class.color());
         let r = 2.0 * kp.sigma;
         let steps = (2.0 * std::f32::consts::PI * r).ceil() as usize * 2;
@@ -438,6 +571,10 @@ mod tests {
     fn params() -> DohParams {
         DohParams {
             crop_size: CROP,
+            bg_radius: CROP as usize,
+            step_level: 6.0,
+            min_symmetry: 0.0,
+            max_neighbors: usize::MAX,
             min_sigma: DohParams::default_min_sigma(CROP),
             max_sigma: DohParams::default_max_sigma(CROP),
             num_scales: 6,
@@ -522,6 +659,19 @@ mod tests {
         gaussian_dip(&mut img, 128.0, 128.0, 3.5, 3.5, -30.0);
         let det = detect(&img, W, H, &params());
         assert!(valid(&det).is_empty(), "{:?}", det.keypoints);
+    }
+
+    #[test]
+    fn radial_symmetry_separates_dots_from_pairs() {
+        let mut dot = base(0.0);
+        gaussian_dip(&mut dot, 128.0, 128.0, 3.5, 3.5, 30.0);
+        let mut pair = base(0.0);
+        gaussian_dip(&mut pair, 124.0, 128.0, 2.5, 2.5, 30.0);
+        gaussian_dip(&mut pair, 132.0, 128.0, 2.5, 2.5, -30.0);
+        let round = radial_symmetry(&dot, W, H, 128, 128, 9.0);
+        let paired = radial_symmetry(&pair, W, H, 128, 128, 9.0);
+        assert!(round > 0.9, "dot {round}");
+        assert!(paired < 0.3, "pair {paired}");
     }
 
     #[test]

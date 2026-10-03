@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use image::GrayImage;
+use image::{GrayImage, ImageBuffer, Luma};
+
+use crate::flood::robust_sigma;
+use crate::scan::Scan;
 
 /// Save an f32 buffer as a grayscale PNG, rescaling to [0, 255].
 fn save_debug_image(data: &[f32], width: usize, height: usize, path: &Path) {
@@ -31,6 +34,12 @@ pub struct Defect {
     pub y: u32,
     /// Absolute local contrast (higher = more prominent)
     pub contrast: f32,
+    /// Feature size in pixels: DoH σ, √area for flood, 0 for peaks.
+    pub size: f32,
+    /// Shape roundness in [0, 1], as measured by the detecting method.
+    pub isotropy: f32,
+    /// Rotational symmetry in [0, 1] (DoH only, 0 otherwise).
+    pub symmetry: f32,
 }
 
 /// Level a grayscale image by subtracting the row-wise median.
@@ -65,11 +74,37 @@ pub fn level_gaussian_bg(pixels: &[f32], width: usize, height: usize, radius: us
         bg = box_blur_v(&bg, width, height, radius);
     }
 
-    pixels
-        .iter()
-        .zip(bg.iter())
-        .map(|(&p, &b)| p - b)
-        .collect()
+    pixels.iter().zip(bg.iter()).map(|(&p, &b)| p - b).collect()
+}
+
+/// Like [`level_gaussian_bg`], but the background ignores features that
+/// stick out of it. Each pass clamps pixels to `bg ± 2σ` of the previous
+/// background before blurring again, thus a bright adsorbate or a dark CO
+/// no longer pulls the background along and leaves a halo of the opposite
+/// sign around itself, which a blob detector would pick up.
+pub fn level_robust_bg(pixels: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+    let blur = |src: &[f32]| {
+        let mut bg = src.to_vec();
+        for _ in 0..3 {
+            bg = box_blur_h(&bg, width, height, radius);
+            bg = box_blur_v(&bg, width, height, radius);
+        }
+        bg
+    };
+
+    let mut bg = blur(pixels);
+    for _ in 0..3 {
+        let residual: Vec<f32> = pixels.iter().zip(&bg).map(|(p, b)| p - b).collect();
+        let clip = 2.0 * robust_sigma(&residual);
+        let clamped: Vec<f32> = pixels
+            .iter()
+            .zip(&bg)
+            .map(|(&p, &b)| p.clamp(b - clip, b + clip))
+            .collect();
+        bg = blur(&clamped);
+    }
+
+    pixels.iter().zip(&bg).map(|(p, b)| p - b).collect()
 }
 
 /// Horizontal box blur (1D, per row).
@@ -177,11 +212,7 @@ fn blobness(
     cy: usize,
     radius: usize,
 ) -> f32 {
-    if cx < radius + 1
-        || cy < radius + 1
-        || cx + radius + 1 >= width
-        || cy + radius + 1 >= height
-    {
+    if cx < radius + 1 || cy < radius + 1 || cx + radius + 1 >= width || cy + radius + 1 >= height {
         return 0.0;
     }
 
@@ -275,6 +306,9 @@ pub fn find_peaks(
                     x: x as u32,
                     y: y as u32,
                     contrast: c,
+                    size: 0.0,
+                    isotropy: blob,
+                    symmetry: 0.0,
                 });
             }
         }
@@ -396,25 +430,35 @@ fn refine_center(
     (new_x, new_y, shift)
 }
 
-/// Crop square patches around detected defects from the original image
-/// and save as grayscale PNGs (no normalisation — the classifier handles that).
+/// Crop square patches around detected defects from the leveled scan and
+/// save them as 16-bit grayscale PNGs, each stretched to its own min/max.
+/// The classifier standardizes per image anyway, and 16 bit keeps the
+/// height resolution of `.sxm` input.
 ///
 /// `crop_size`: side length of the square crop (in pixels)
+/// `sign`: -1 for an inverted scan, so crops keep the real contrast.
 /// `prefix`: file name prefix, typically the scan's file stem, so crops from
 /// several scans can share one output directory and stay traceable.
+/// `<prefix>_crops.csv` records each saved crop's center (pixels of the
+/// leveled, resampled scan), strength, size and isotropy.
 /// Defects too close to the image border (where a full crop can't fit) are skipped.
+#[allow(clippy::too_many_arguments)]
 pub fn crop_and_save(
-    image: &GrayImage,
+    data: &[f32],
+    width: usize,
+    height: usize,
     defects: &[Defect],
     crop_size: u32,
     output_dir: &Path,
     prefix: &str,
+    sign: f32,
 ) {
     let half = crop_size / 2;
-    let (img_w, img_h) = image.dimensions();
+    let (img_w, img_h) = (width as u32, height as u32);
 
     std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
+    let mut manifest = String::from("file,x,y,strength,size,isotropy,symmetry\n");
     let mut saved = 0;
     for defect in defects {
         if defect.x < half
@@ -425,21 +469,41 @@ pub fn crop_and_save(
             continue;
         }
 
-        let crop = image::imageops::crop_imm(
-            image,
-            defect.x - half,
-            defect.y - half,
-            crop_size,
-            crop_size,
-        )
-        .to_image();
+        let (x0, y0) = ((defect.x - half) as usize, (defect.y - half) as usize);
+        let size = crop_size as usize;
+        let values: Vec<f32> = (y0..y0 + size)
+            .flat_map(|y| {
+                data[y * width + x0..y * width + x0 + size]
+                    .iter()
+                    .map(|v| v * sign)
+            })
+            .collect();
+        let min = values.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let range = (max - min).max(f32::MIN_POSITIVE);
+        let pixels: Vec<u16> = values
+            .iter()
+            .map(|v| ((v - min) / range * u16::MAX as f32).round() as u16)
+            .collect();
+        let crop = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(crop_size, crop_size, pixels)
+            .expect("crop buffer size matches dimensions");
 
-        let filename = output_dir.join(format!("{prefix}_{saved:04}.png"));
+        let name = format!("{prefix}_{saved:04}.png");
+        let filename = output_dir.join(&name);
         crop.save(&filename)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", filename.display()));
+        manifest.push_str(&format!(
+            "{name},{},{},{:.3},{:.3},{:.3},{:.3}\n",
+            defect.x, defect.y, defect.contrast, defect.size, defect.isotropy, defect.symmetry
+        ));
         saved += 1;
     }
 
+    if saved > 0 {
+        let path = output_dir.join(format!("{prefix}_crops.csv"));
+        std::fs::write(&path, manifest)
+            .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
+    }
     println!("Saved {saved} crops to {}", output_dir.display());
 }
 
@@ -451,7 +515,7 @@ pub fn crop_and_save(
 /// - `<prefix>_debug_contrast.png`: local contrast map
 #[allow(clippy::too_many_arguments)]
 pub fn extract_defects(
-    image: &GrayImage,
+    scan: &Scan,
     crop_size: u32,
     contrast_radius: usize,
     min_contrast: f32,
@@ -460,14 +524,11 @@ pub fn extract_defects(
     prefix: &str,
     debug: bool,
 ) {
-    let (width, height) = image.dimensions();
-    let (w, h) = (width as usize, height as usize);
-
-    // Convert to f32
-    let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
+    let (w, h) = (scan.width, scan.height);
+    let (width, height) = (w as u32, h as u32);
 
     // Step 1: row-wise median to remove scan-line offsets
-    let line_leveled = level_line_median(&pixels, w, h);
+    let line_leveled = level_line_median(&scan.data, w, h);
 
     // Step 2: 2D Gaussian background subtraction for detection only.
     //         Removes slow gradients without the streaking that row-median
@@ -538,11 +599,7 @@ pub fn extract_defects(
                 return None;
             }
 
-            Some(Defect {
-                x: nx,
-                y: ny,
-                contrast: d.contrast,
-            })
+            Some(Defect { x: nx, y: ny, ..d })
         })
         .collect();
 
@@ -575,5 +632,40 @@ pub fn extract_defects(
     );
 
     // Crop from original image — the classifier does its own normalisation
-    crop_and_save(image, &final_defects, crop_size, output_dir, prefix);
+    crop_and_save(
+        &leveled,
+        w,
+        h,
+        &final_defects,
+        crop_size,
+        output_dir,
+        prefix,
+        scan.sign,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn robust_bg_leaves_no_halo_around_bright_blob() {
+        let (w, h) = (128, 128);
+        let img: Vec<f32> = (0..w * h)
+            .map(|i| {
+                let (dx, dy) = ((i % w) as f32 - 64.0, (i / w) as f32 - 64.0);
+                100.0 * (-(dx * dx + dy * dy) / (2.0 * 3.0 * 3.0)).exp()
+            })
+            .collect();
+        let plain = level_gaussian_bg(&img, w, h, 12);
+        let robust = level_robust_bg(&img, w, h, 12);
+        let halo = |v: &[f32]| v.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!(halo(&plain) < -2.0, "plain halo {}", halo(&plain));
+        assert!(
+            halo(&robust) > halo(&plain) / 3.0,
+            "robust halo {} vs plain {}",
+            halo(&robust),
+            halo(&plain)
+        );
+    }
 }

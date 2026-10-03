@@ -37,7 +37,14 @@ co-tip-net classify --model pretrained_weights/model.pt datasets/co/valid/goods/
 
 ### Extract defect crops from large scans
 
+Nanonis `.sxm` scans are read directly (Z forward, in pm). Aborted scans are cut to their longest block of complete rows, and every scan is resampled to `--nm-per-px` (default 30 nm / 512 px), so `--crop-size` and the blob sizes mean the same physical size across scan ranges. Scans coarser than `--max-upsample` (default 2x) are skipped. Ordinary images are read as grayscale at native resolution.
+
+For `flood` and `doh`, the scan is row-leveled and a clipped background (`--bg-radius`, default `crop_size/3`) is subtracted, so bright adsorbates and COs do not leave halos. Step edges and oxide stripes are masked from the height gradient (`--step-level`, 0 disables) and their detections reported as `step edge`. The defaults were tuned on Cu(110) scans at 30 nm.
+
 ```sh
+# Extract from a Nanonis scan; crops are 16-bit PNGs from the leveled data
+co-tip-net extract scan.sxm --method doh --output crops/ --debug
+
 # Extract individual defect patches from a full-area scan
 co-tip-net extract scan.png --output crops/ --crop-size 40
 
