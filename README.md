@@ -50,6 +50,16 @@ co-tip-net extract scan.png --output crops/ \
 
 The extraction pipeline: line-by-line median leveling, local contrast detection, isotropy filtering, center-of-mass refinement, and cropping.
 
+Alternatively, flood the leveled scan below the background and classify each connected region as valid, too small, too large, elongated or close to edge (after Schnorrenberg et al., Uni Osnabrück):
+
+```sh
+co-tip-net extract scan.png --method flood --output crops/ --debug \
+  --flood-level 3 \
+  --min-area 25 --max-area 400
+```
+
+The water level is in units of the robust noise σ (1.4826 · MAD). With `--debug`, the per-class counts, the region area distribution and a class-colored overlay (`debug_flood.png`) are written to help tune the area limits for a given pixel scale.
+
 ### Train / fine-tune
 
 ```sh
