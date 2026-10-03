@@ -67,6 +67,10 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Method::Peaks)]
         method: Method,
 
+        /// Look for dark depressions or bright protrusions
+        #[arg(long, value_enum, default_value_t = Polarity::Both)]
+        polarity: Polarity,
+
         /// Crop size in pixels (before resize to 16x16)
         #[arg(long, default_value_t = 40)]
         crop_size: u32,
@@ -117,6 +121,11 @@ enum Command {
         #[arg(long)]
         max_sigma: Option<f32>,
 
+        /// [doh] Minimum rotational symmetry (0-1): share of the variation around
+        /// a blob explained by its radial profile
+        #[arg(long, default_value_t = 0.4)]
+        min_symmetry: f32,
+
         /// [doh] Number of scales between min and max σ
         #[arg(long, default_value_t = 6)]
         num_scales: usize,
@@ -144,6 +153,16 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Freeze::None)]
         freeze: Freeze,
     },
+}
+
+#[derive(Clone, PartialEq, ValueEnum)]
+enum Polarity {
+    /// Depressions below the background
+    Dark,
+    /// Protrusions above the background
+    Bright,
+    /// Both, as separate passes; the contrast of a CO depends on the tip
+    Both,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -191,6 +210,7 @@ fn main() {
             max_upsample,
             output,
             method,
+            polarity,
             crop_size,
             contrast_radius,
             min_contrast,
@@ -204,58 +224,74 @@ fn main() {
             min_sigma,
             max_sigma,
             num_scales,
+            min_symmetry,
             debug,
         } => {
-            let scan = scan::Scan::open(&input, nm_per_px, max_upsample).unwrap_or_else(|e| {
+            let loaded = scan::Scan::open(&input, nm_per_px, max_upsample).unwrap_or_else(|e| {
                 eprintln!("Skipping {}: {e}", input.display());
                 std::process::exit(1);
             });
             // Crops are named after the scan so several scans can share one
-            // output directory.
-            let prefix = input
+            // output directory; with both polarities, after the pass too.
+            let stem = input
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "scan".into());
+            let passes = match polarity {
+                Polarity::Dark => vec![(false, stem)],
+                Polarity::Bright => vec![(true, stem)],
+                Polarity::Both => vec![
+                    (false, format!("{stem}_dark")),
+                    (true, format!("{stem}_bright")),
+                ],
+            };
             let bg_radius = bg_radius.unwrap_or(crop_size as usize / 3);
-            match method {
-                Method::Peaks => detect::extract_defects(
-                    &scan,
-                    crop_size,
-                    contrast_radius,
-                    min_contrast,
-                    min_isotropy,
-                    &output,
-                    &prefix,
-                    debug,
-                ),
-                Method::Flood => {
-                    let params = flood::FloodParams {
-                        crop_size,
-                        bg_radius,
-                        step_level,
-                        level_sigma: flood_level,
-                        min_area: min_area
-                            .unwrap_or_else(|| flood::FloodParams::default_min_area(crop_size)),
-                        max_area: max_area
-                            .unwrap_or_else(|| flood::FloodParams::default_max_area(crop_size)),
-                        min_isotropy,
-                    };
-                    flood::extract_defects_flood(&scan, &params, &output, &prefix, debug);
+            for (invert, prefix) in passes {
+                let mut scan = loaded.clone();
+                if invert {
+                    scan.invert();
                 }
-                Method::Doh => {
-                    let params = doh::DohParams {
+                match method {
+                    Method::Peaks => detect::extract_defects(
+                        &scan,
                         crop_size,
-                        bg_radius,
-                        step_level,
-                        min_sigma: min_sigma
-                            .unwrap_or_else(|| doh::DohParams::default_min_sigma(crop_size)),
-                        max_sigma: max_sigma
-                            .unwrap_or_else(|| doh::DohParams::default_max_sigma(crop_size)),
-                        num_scales,
-                        level_sigma: doh_level,
+                        contrast_radius,
+                        min_contrast,
                         min_isotropy,
-                    };
-                    doh::extract_defects_doh(&scan, &params, &output, &prefix, debug);
+                        &output,
+                        &prefix,
+                        debug,
+                    ),
+                    Method::Flood => {
+                        let params = flood::FloodParams {
+                            crop_size,
+                            bg_radius,
+                            step_level,
+                            level_sigma: flood_level,
+                            min_area: min_area
+                                .unwrap_or_else(|| flood::FloodParams::default_min_area(crop_size)),
+                            max_area: max_area
+                                .unwrap_or_else(|| flood::FloodParams::default_max_area(crop_size)),
+                            min_isotropy,
+                        };
+                        flood::extract_defects_flood(&scan, &params, &output, &prefix, debug);
+                    }
+                    Method::Doh => {
+                        let params = doh::DohParams {
+                            crop_size,
+                            bg_radius,
+                            step_level,
+                            min_sigma: min_sigma
+                                .unwrap_or_else(|| doh::DohParams::default_min_sigma(crop_size)),
+                            max_sigma: max_sigma
+                                .unwrap_or_else(|| doh::DohParams::default_max_sigma(crop_size)),
+                            num_scales,
+                            level_sigma: doh_level,
+                            min_isotropy,
+                            min_symmetry,
+                        };
+                        doh::extract_defects_doh(&scan, &params, &output, &prefix, debug);
+                    }
                 }
             }
         }

@@ -30,6 +30,8 @@ pub struct DohParams {
     pub bg_radius: usize,
     /// Step-edge mask threshold in robust σ of the gradient, `<= 0` disables.
     pub step_level: f32,
+    /// Minimum [`radial_symmetry`] for a valid blob.
+    pub min_symmetry: f32,
     /// Smallest blob σ accepted as a CO (pixels).
     pub min_sigma: f32,
     /// Largest blob σ accepted as a CO (pixels).
@@ -76,7 +78,59 @@ pub struct Keypoint {
     pub strength: f32,
     /// `λ_min / λ_max` of the Hessian at the keypoint, at `min_sigma`.
     pub isotropy: f32,
+    /// Share of the variation around the keypoint explained by its radial
+    /// profile, see [`radial_symmetry`].
+    pub symmetry: f32,
     pub class: RegionClass,
+}
+
+/// How rotationally symmetric the feature at (`cx`, `cy`) is: the share of
+/// the variance within `radius` that the azimuthally averaged profile
+/// explains. A round dot scores near 1; a row fragment, a dimer or a
+/// feature with a neighbor beside it scores low, even when its curvature
+/// at the center is isotropic.
+pub fn radial_symmetry(
+    data: &[f32],
+    width: usize,
+    height: usize,
+    cx: usize,
+    cy: usize,
+    radius: f32,
+) -> f32 {
+    let r = radius.ceil() as isize;
+    let bins = r as usize + 1;
+    let mut sum = vec![0.0_f64; bins];
+    let mut count = vec![0usize; bins];
+    let mut samples = Vec::new();
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let (x, y) = (cx as isize + dx, cy as isize + dy);
+            if x < 0 || y < 0 || x >= width as isize || y >= height as isize {
+                continue;
+            }
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d > radius {
+                continue;
+            }
+            let bin = d.round() as usize;
+            let v = data[y as usize * width + x as usize] as f64;
+            sum[bin] += v;
+            count[bin] += 1;
+            samples.push((bin, v));
+        }
+    }
+    let n = samples.len() as f64;
+    let mean = samples.iter().map(|&(_, v)| v).sum::<f64>() / n;
+    let (mut total, mut residual) = (0.0, 0.0);
+    for &(bin, v) in &samples {
+        let profile = sum[bin] / count[bin] as f64;
+        total += (v - mean).powi(2);
+        residual += (v - profile).powi(2);
+    }
+    if total <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - residual / total).max(0.0) as f32
 }
 
 /// Sampled Gaussian and its first and second derivatives, truncated at 4σ.
@@ -236,6 +290,8 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
                 }
 
                 let iso = isotropy[y * width + x];
+                let sym =
+                    radial_symmetry(&leveled, width, height, x, y, (2.5 * ladder[si]).max(4.0));
                 let fits = x >= half && y >= half && x + half < width && y + half < height;
                 let class = if mask[y * width + x] {
                     RegionClass::StepEdge
@@ -245,6 +301,8 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
                     RegionClass::TooLarge
                 } else if iso < params.min_isotropy {
                     RegionClass::Elongated
+                } else if sym < params.min_symmetry {
+                    RegionClass::NotRound
                 } else if !fits {
                     RegionClass::CloseToEdge
                 } else {
@@ -257,6 +315,7 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
                     sigma: ladder[si],
                     strength: v,
                     isotropy: iso,
+                    symmetry: sym,
                     class,
                 });
             }
@@ -317,6 +376,7 @@ pub fn extract_defects_doh(
             contrast: k.strength,
             size: k.sigma,
             isotropy: k.isotropy,
+            symmetry: k.symmetry,
         })
         .collect();
 
@@ -324,7 +384,7 @@ pub fn extract_defects_doh(
         print_debug_stats(&det, params);
         std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
         let path = output_dir.join(format!("{prefix}_debug_doh.png"));
-        render_overlay(&det, w, h)
+        render_overlay(&det, w, h, scan.sign)
             .save(&path)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
         println!("Saved {}", path.display());
@@ -340,6 +400,7 @@ pub fn extract_defects_doh(
         params.crop_size,
         output_dir,
         prefix,
+        scan.sign,
     );
 }
 
@@ -390,9 +451,13 @@ fn print_debug_stats(det: &Detection, params: &DohParams) {
         "Valid isotropy: {}",
         quantiles(valid.iter().map(|k| k.isotropy).collect())
     );
+    println!(
+        "Valid symmetry: {}",
+        quantiles(valid.iter().map(|k| k.symmetry).collect())
+    );
 }
 
-fn render_overlay(det: &Detection, width: usize, height: usize) -> RgbImage {
+fn render_overlay(det: &Detection, width: usize, height: usize, sign: f32) -> RgbImage {
     let min = det.leveled.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = det
         .leveled
@@ -404,6 +469,8 @@ fn render_overlay(det: &Detection, width: usize, height: usize) -> RgbImage {
     let mut img = RgbImage::from_fn(width as u32, height as u32, |x, y| {
         let v = det.leveled[y as usize * width + x as usize];
         let g = ((v - min) / range * 255.0) as u8;
+        // Show an inverted scan with its real contrast.
+        let g = if sign < 0.0 { 255 - g } else { g };
         if det.step_mask[y as usize * width + x as usize] {
             // Tint the mask instead of drawing its many keypoints.
             let [r, gr, b] = RegionClass::StepEdge.color();
@@ -471,6 +538,7 @@ mod tests {
             crop_size: CROP,
             bg_radius: CROP as usize,
             step_level: 6.0,
+            min_symmetry: 0.0,
             min_sigma: DohParams::default_min_sigma(CROP),
             max_sigma: DohParams::default_max_sigma(CROP),
             num_scales: 6,
@@ -555,6 +623,19 @@ mod tests {
         gaussian_dip(&mut img, 128.0, 128.0, 3.5, 3.5, -30.0);
         let det = detect(&img, W, H, &params());
         assert!(valid(&det).is_empty(), "{:?}", det.keypoints);
+    }
+
+    #[test]
+    fn radial_symmetry_separates_dots_from_pairs() {
+        let mut dot = base(0.0);
+        gaussian_dip(&mut dot, 128.0, 128.0, 3.5, 3.5, 30.0);
+        let mut pair = base(0.0);
+        gaussian_dip(&mut pair, 124.0, 128.0, 2.5, 2.5, 30.0);
+        gaussian_dip(&mut pair, 132.0, 128.0, 2.5, 2.5, -30.0);
+        let round = radial_symmetry(&dot, W, H, 128, 128, 9.0);
+        let paired = radial_symmetry(&pair, W, H, 128, 128, 9.0);
+        assert!(round > 0.9, "dot {round}");
+        assert!(paired < 0.3, "pair {paired}");
     }
 
     #[test]

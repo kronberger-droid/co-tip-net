@@ -17,10 +17,13 @@ use crate::sxm::Sxm;
 /// Default pixel scale: 30 nm over 512 px, the most common scan setting.
 pub const DEFAULT_NM_PER_PX: f32 = 30.0 / 512.0;
 
+#[derive(Clone)]
 pub struct Scan {
     pub data: Vec<f32>,
     pub width: usize,
     pub height: usize,
+    /// -1 after [`Scan::invert`], so outputs can restore the real contrast.
+    pub sign: f32,
 }
 
 impl Scan {
@@ -43,6 +46,7 @@ impl Scan {
             data,
             width,
             height,
+            sign: 1.0,
         })
     }
 
@@ -69,7 +73,17 @@ impl Scan {
             data: resample(&data, frame.width, frame.height, width, height),
             width,
             height,
+            sign: 1.0,
         })
+    }
+
+    /// Flip the height axis, so the detectors, which look for depressions,
+    /// find protrusions instead. Crops and overlays undo it via `sign`.
+    pub fn invert(&mut self) {
+        for v in self.data.iter_mut() {
+            *v = -*v;
+        }
+        self.sign = -self.sign;
     }
 }
 

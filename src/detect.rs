@@ -38,6 +38,8 @@ pub struct Defect {
     pub size: f32,
     /// Shape roundness in [0, 1], as measured by the detecting method.
     pub isotropy: f32,
+    /// Rotational symmetry in [0, 1] (DoH only, 0 otherwise).
+    pub symmetry: f32,
 }
 
 /// Level a grayscale image by subtracting the row-wise median.
@@ -306,6 +308,7 @@ pub fn find_peaks(
                     contrast: c,
                     size: 0.0,
                     isotropy: blob,
+                    symmetry: 0.0,
                 });
             }
         }
@@ -433,11 +436,13 @@ fn refine_center(
 /// height resolution of `.sxm` input.
 ///
 /// `crop_size`: side length of the square crop (in pixels)
+/// `sign`: -1 for an inverted scan, so crops keep the real contrast.
 /// `prefix`: file name prefix, typically the scan's file stem, so crops from
 /// several scans can share one output directory and stay traceable.
 /// `<prefix>_crops.csv` records each saved crop's center (pixels of the
 /// leveled, resampled scan), strength, size and isotropy.
 /// Defects too close to the image border (where a full crop can't fit) are skipped.
+#[allow(clippy::too_many_arguments)]
 pub fn crop_and_save(
     data: &[f32],
     width: usize,
@@ -446,13 +451,14 @@ pub fn crop_and_save(
     crop_size: u32,
     output_dir: &Path,
     prefix: &str,
+    sign: f32,
 ) {
     let half = crop_size / 2;
     let (img_w, img_h) = (width as u32, height as u32);
 
     std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
-    let mut manifest = String::from("file,x,y,strength,size,isotropy\n");
+    let mut manifest = String::from("file,x,y,strength,size,isotropy,symmetry\n");
     let mut saved = 0;
     for defect in defects {
         if defect.x < half
@@ -466,7 +472,11 @@ pub fn crop_and_save(
         let (x0, y0) = ((defect.x - half) as usize, (defect.y - half) as usize);
         let size = crop_size as usize;
         let values: Vec<f32> = (y0..y0 + size)
-            .flat_map(|y| data[y * width + x0..y * width + x0 + size].iter().copied())
+            .flat_map(|y| {
+                data[y * width + x0..y * width + x0 + size]
+                    .iter()
+                    .map(|v| v * sign)
+            })
             .collect();
         let min = values.iter().cloned().fold(f32::INFINITY, f32::min);
         let max = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -483,8 +493,8 @@ pub fn crop_and_save(
         crop.save(&filename)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", filename.display()));
         manifest.push_str(&format!(
-            "{name},{},{},{:.3},{:.3},{:.3}\n",
-            defect.x, defect.y, defect.contrast, defect.size, defect.isotropy
+            "{name},{},{},{:.3},{:.3},{:.3},{:.3}\n",
+            defect.x, defect.y, defect.contrast, defect.size, defect.isotropy, defect.symmetry
         ));
         saved += 1;
     }
@@ -589,11 +599,7 @@ pub fn extract_defects(
                 return None;
             }
 
-            Some(Defect {
-                x: nx,
-                y: ny,
-                ..d
-            })
+            Some(Defect { x: nx, y: ny, ..d })
         })
         .collect();
 
@@ -634,6 +640,7 @@ pub fn extract_defects(
         crop_size,
         output_dir,
         prefix,
+        scan.sign,
     );
 }
 

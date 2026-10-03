@@ -60,16 +60,18 @@ pub enum RegionClass {
     Elongated,
     CloseToEdge,
     StepEdge,
+    NotRound,
 }
 
 impl RegionClass {
-    pub(crate) const ALL: [RegionClass; 6] = [
+    pub(crate) const ALL: [RegionClass; 7] = [
         RegionClass::Valid,
         RegionClass::TooSmall,
         RegionClass::TooLarge,
         RegionClass::Elongated,
         RegionClass::CloseToEdge,
         RegionClass::StepEdge,
+        RegionClass::NotRound,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -80,6 +82,7 @@ impl RegionClass {
             RegionClass::Elongated => "elongated",
             RegionClass::CloseToEdge => "close to edge",
             RegionClass::StepEdge => "step edge",
+            RegionClass::NotRound => "not round",
         }
     }
 
@@ -92,6 +95,7 @@ impl RegionClass {
             RegionClass::Elongated => [210, 60, 210],
             RegionClass::CloseToEdge => [240, 150, 30],
             RegionClass::StepEdge => [230, 220, 40],
+            RegionClass::NotRound => [255, 120, 170],
         }
     }
 }
@@ -328,6 +332,7 @@ pub fn extract_defects_flood(
             contrast: r.depth,
             size: (r.pixels.len() as f32).sqrt(),
             isotropy: r.isotropy,
+            symmetry: 0.0,
         })
         .collect();
 
@@ -335,7 +340,7 @@ pub fn extract_defects_flood(
         print_debug_stats(&seg, params);
         std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
         let path = output_dir.join(format!("{prefix}_debug_flood.png"));
-        render_overlay(&seg, w, h)
+        render_overlay(&seg, w, h, scan.sign)
             .save(&path)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
         println!("Saved {}", path.display());
@@ -351,6 +356,7 @@ pub fn extract_defects_flood(
         params.crop_size,
         output_dir,
         prefix,
+        scan.sign,
     );
 }
 
@@ -386,7 +392,7 @@ fn print_debug_stats(seg: &Segmentation, params: &FloodParams) {
     );
 }
 
-fn render_overlay(seg: &Segmentation, width: usize, height: usize) -> RgbImage {
+fn render_overlay(seg: &Segmentation, width: usize, height: usize, sign: f32) -> RgbImage {
     let min = seg.leveled.iter().cloned().fold(f32::INFINITY, f32::min);
     let max = seg
         .leveled
@@ -398,6 +404,8 @@ fn render_overlay(seg: &Segmentation, width: usize, height: usize) -> RgbImage {
     let mut img = RgbImage::from_fn(width as u32, height as u32, |x, y| {
         let v = seg.leveled[y as usize * width + x as usize];
         let g = ((v - min) / range * 255.0) as u8;
+        // Show an inverted scan with its real contrast.
+        let g = if sign < 0.0 { 255 - g } else { g };
         Rgb([g, g, g])
     });
 
