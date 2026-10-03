@@ -315,6 +315,8 @@ pub fn extract_defects_doh(
             x: k.x as u32,
             y: k.y as u32,
             contrast: k.strength,
+            size: k.sigma,
+            isotropy: k.isotropy,
         })
         .collect();
 

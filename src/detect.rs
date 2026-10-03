@@ -34,6 +34,10 @@ pub struct Defect {
     pub y: u32,
     /// Absolute local contrast (higher = more prominent)
     pub contrast: f32,
+    /// Feature size in pixels: DoH σ, √area for flood, 0 for peaks.
+    pub size: f32,
+    /// Shape roundness in [0, 1], as measured by the detecting method.
+    pub isotropy: f32,
 }
 
 /// Level a grayscale image by subtracting the row-wise median.
@@ -300,6 +304,8 @@ pub fn find_peaks(
                     x: x as u32,
                     y: y as u32,
                     contrast: c,
+                    size: 0.0,
+                    isotropy: blob,
                 });
             }
         }
@@ -429,6 +435,8 @@ fn refine_center(
 /// `crop_size`: side length of the square crop (in pixels)
 /// `prefix`: file name prefix, typically the scan's file stem, so crops from
 /// several scans can share one output directory and stay traceable.
+/// `<prefix>_crops.csv` records each saved crop's center (pixels of the
+/// leveled, resampled scan), strength, size and isotropy.
 /// Defects too close to the image border (where a full crop can't fit) are skipped.
 pub fn crop_and_save(
     data: &[f32],
@@ -444,6 +452,7 @@ pub fn crop_and_save(
 
     std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
 
+    let mut manifest = String::from("file,x,y,strength,size,isotropy\n");
     let mut saved = 0;
     for defect in defects {
         if defect.x < half
@@ -469,12 +478,22 @@ pub fn crop_and_save(
         let crop = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(crop_size, crop_size, pixels)
             .expect("crop buffer size matches dimensions");
 
-        let filename = output_dir.join(format!("{prefix}_{saved:04}.png"));
+        let name = format!("{prefix}_{saved:04}.png");
+        let filename = output_dir.join(&name);
         crop.save(&filename)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", filename.display()));
+        manifest.push_str(&format!(
+            "{name},{},{},{:.3},{:.3},{:.3}\n",
+            defect.x, defect.y, defect.contrast, defect.size, defect.isotropy
+        ));
         saved += 1;
     }
 
+    if saved > 0 {
+        let path = output_dir.join(format!("{prefix}_crops.csv"));
+        std::fs::write(&path, manifest)
+            .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
+    }
     println!("Saved {saved} crops to {}", output_dir.display());
 }
 
@@ -573,7 +592,7 @@ pub fn extract_defects(
             Some(Defect {
                 x: nx,
                 y: ny,
-                contrast: d.contrast,
+                ..d
             })
         })
         .collect();

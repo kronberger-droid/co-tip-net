@@ -326,6 +326,8 @@ pub fn extract_defects_flood(
             x: r.centroid.0.round() as u32,
             y: r.centroid.1.round() as u32,
             contrast: r.depth,
+            size: (r.pixels.len() as f32).sqrt(),
+            isotropy: r.isotropy,
         })
         .collect();
 
