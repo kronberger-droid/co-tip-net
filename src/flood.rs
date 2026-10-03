@@ -56,7 +56,7 @@ pub enum RegionClass {
 }
 
 impl RegionClass {
-    const ALL: [RegionClass; 5] = [
+    pub(crate) const ALL: [RegionClass; 5] = [
         RegionClass::Valid,
         RegionClass::TooSmall,
         RegionClass::TooLarge,
@@ -64,7 +64,7 @@ impl RegionClass {
         RegionClass::CloseToEdge,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             RegionClass::Valid => "valid",
             RegionClass::TooSmall => "too small",
@@ -75,7 +75,7 @@ impl RegionClass {
     }
 
     /// Overlay color, roughly following the poster's legend.
-    fn color(self) -> [u8; 3] {
+    pub(crate) fn color(self) -> [u8; 3] {
         match self {
             RegionClass::Valid => [40, 200, 60],
             RegionClass::TooSmall => [80, 200, 230],

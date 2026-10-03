@@ -1,6 +1,7 @@
 mod batcher;
 mod dataset;
 mod detect;
+mod doh;
 mod flood;
 mod model;
 mod preprocess;
@@ -82,6 +83,22 @@ enum Command {
         #[arg(long)]
         max_area: Option<usize>,
 
+        /// [doh] Detection threshold in units of the robust noise σ
+        #[arg(long, default_value_t = 4.0)]
+        doh_level: f32,
+
+        /// [doh] Smallest blob σ accepted as a CO, in pixels [default: crop_size/16]
+        #[arg(long)]
+        min_sigma: Option<f32>,
+
+        /// [doh] Largest blob σ accepted as a CO, in pixels [default: crop_size/6]
+        #[arg(long)]
+        max_sigma: Option<f32>,
+
+        /// [doh] Number of scales between min and max σ
+        #[arg(long, default_value_t = 6)]
+        num_scales: usize,
+
         /// Save intermediate debug images (leveled, contrast map, flood overlay) to output dir.
         #[arg(long, default_value_t = false)]
         debug: bool,
@@ -113,6 +130,8 @@ enum Method {
     Peaks,
     /// Flood below the background and classify connected regions by size and shape
     Flood,
+    /// Scale-constrained determinant-of-Hessian blob detector (SURF's detector)
+    Doh,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -155,6 +174,10 @@ fn main() {
             flood_level,
             min_area,
             max_area,
+            doh_level,
+            min_sigma,
+            max_sigma,
+            num_scales,
             debug,
         } => {
             let image = image::open(&input)
@@ -181,6 +204,19 @@ fn main() {
                         min_isotropy,
                     };
                     flood::extract_defects_flood(&image, &params, &output, debug);
+                }
+                Method::Doh => {
+                    let params = doh::DohParams {
+                        crop_size,
+                        min_sigma: min_sigma
+                            .unwrap_or_else(|| doh::DohParams::default_min_sigma(crop_size)),
+                        max_sigma: max_sigma
+                            .unwrap_or_else(|| doh::DohParams::default_max_sigma(crop_size)),
+                        num_scales,
+                        level_sigma: doh_level,
+                        min_isotropy,
+                    };
+                    doh::extract_defects_doh(&image, &params, &output, debug);
                 }
             }
         }

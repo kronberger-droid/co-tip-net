@@ -60,6 +60,16 @@ co-tip-net extract scan.png --method flood --output crops/ --debug \
 
 The water level is in units of the robust noise σ (1.4826 · MAD). With `--debug`, the per-class counts, the region area distribution and a class-colored overlay (`debug_flood.png`) are written to help tune the area limits for a given pixel scale.
 
+A third method is a scale-constrained determinant-of-Hessian blob detector, the detector half of SURF, as used for the CNN cutouts on the same poster:
+
+```sh
+co-tip-net extract scan.png --method doh --output crops/ --debug \
+  --doh-level 4 \
+  --min-sigma 2.5 --max-sigma 6.7
+```
+
+Only dark blobs whose response peaks between `--min-sigma` and `--max-sigma` are kept. The strength is scaled to the depth of a matched Gaussian dip, so `--doh-level` is in noise σ like the flood level. `--debug` writes `debug_doh.png` with a circle of radius 2σ per detection.
+
 ### Train / fine-tune
 
 ```sh
