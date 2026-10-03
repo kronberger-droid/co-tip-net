@@ -65,11 +65,7 @@ pub fn level_gaussian_bg(pixels: &[f32], width: usize, height: usize, radius: us
         bg = box_blur_v(&bg, width, height, radius);
     }
 
-    pixels
-        .iter()
-        .zip(bg.iter())
-        .map(|(&p, &b)| p - b)
-        .collect()
+    pixels.iter().zip(bg.iter()).map(|(&p, &b)| p - b).collect()
 }
 
 /// Horizontal box blur (1D, per row).
@@ -177,11 +173,7 @@ fn blobness(
     cy: usize,
     radius: usize,
 ) -> f32 {
-    if cx < radius + 1
-        || cy < radius + 1
-        || cx + radius + 1 >= width
-        || cy + radius + 1 >= height
-    {
+    if cx < radius + 1 || cy < radius + 1 || cx + radius + 1 >= width || cy + radius + 1 >= height {
         return 0.0;
     }
 
