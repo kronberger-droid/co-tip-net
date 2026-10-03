@@ -48,6 +48,8 @@ co-tip-net extract scan.png --output crops/ \
   --contrast-radius 20
 ```
 
+Crops are named after the scan, `<scan>_0000.png`, `<scan>_0001.png`, …, so several scans can be extracted into one directory and every crop stays traceable to its source.
+
 The extraction pipeline: line-by-line median leveling, local contrast detection, isotropy filtering, center-of-mass refinement, and cropping.
 
 Alternatively, flood the leveled scan below the background and classify each connected region as valid, too small, too large, elongated or close to edge (after Schnorrenberg et al., Uni Osnabrück):
@@ -58,7 +60,7 @@ co-tip-net extract scan.png --method flood --output crops/ --debug \
   --min-area 25 --max-area 400
 ```
 
-The water level is in units of the robust noise σ (1.4826 · MAD). With `--debug`, the per-class counts, the region area distribution and a class-colored overlay (`debug_flood.png`) are written to help tune the area limits for a given pixel scale.
+The water level is in units of the robust noise σ (1.4826 · MAD). With `--debug`, the per-class counts, the region area distribution and a class-colored overlay (`<scan>_debug_flood.png`) are written to help tune the area limits for a given pixel scale.
 
 A third method is a scale-constrained determinant-of-Hessian blob detector, the detector half of SURF, as used for the CNN cutouts on the same poster:
 
@@ -68,7 +70,7 @@ co-tip-net extract scan.png --method doh --output crops/ --debug \
   --min-sigma 2.5 --max-sigma 6.7
 ```
 
-Only dark blobs whose response peaks between `--min-sigma` and `--max-sigma` are kept. The strength is scaled to the depth of a matched Gaussian dip, so `--doh-level` is in noise σ like the flood level. `--debug` writes `debug_doh.png` with a circle of radius 2σ per detection.
+Only dark blobs whose response peaks between `--min-sigma` and `--max-sigma` are kept. The strength is scaled to the depth of a matched Gaussian dip, so `--doh-level` is in noise σ like the flood level. `--debug` writes `<scan>_debug_doh.png` with a circle of radius 2σ per detection.
 
 ### Train / fine-tune
 

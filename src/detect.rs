@@ -400,12 +400,15 @@ fn refine_center(
 /// and save as grayscale PNGs (no normalisation — the classifier handles that).
 ///
 /// `crop_size`: side length of the square crop (in pixels)
+/// `prefix`: file name prefix, typically the scan's file stem, so crops from
+/// several scans can share one output directory and stay traceable.
 /// Defects too close to the image border (where a full crop can't fit) are skipped.
 pub fn crop_and_save(
     image: &GrayImage,
     defects: &[Defect],
     crop_size: u32,
     output_dir: &Path,
+    prefix: &str,
 ) {
     let half = crop_size / 2;
     let (img_w, img_h) = image.dimensions();
@@ -431,7 +434,7 @@ pub fn crop_and_save(
         )
         .to_image();
 
-        let filename = output_dir.join(format!("defect_{:04}.png", saved));
+        let filename = output_dir.join(format!("{prefix}_{saved:04}.png"));
         crop.save(&filename)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", filename.display()));
         saved += 1;
@@ -443,9 +446,10 @@ pub fn crop_and_save(
 /// Full extraction pipeline: level → detect → crop.
 ///
 /// If `debug` is true, saves intermediate images to `output_dir`:
-/// - `debug_line_leveled.png`: after row-wise median subtraction
-/// - `debug_leveled.png`: after Gaussian background subtraction
-/// - `debug_contrast.png`: local contrast map
+/// - `<prefix>_debug_line_leveled.png`: after row-wise median subtraction
+/// - `<prefix>_debug_leveled.png`: after Gaussian background subtraction
+/// - `<prefix>_debug_contrast.png`: local contrast map
+#[allow(clippy::too_many_arguments)]
 pub fn extract_defects(
     image: &GrayImage,
     crop_size: u32,
@@ -453,6 +457,7 @@ pub fn extract_defects(
     min_contrast: f32,
     min_isotropy: f32,
     output_dir: &Path,
+    prefix: &str,
     debug: bool,
 ) {
     let (width, height) = image.dimensions();
@@ -475,9 +480,12 @@ pub fn extract_defects(
 
     if debug {
         std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
-        save_debug_image(&line_leveled, w, h, &output_dir.join("debug_line_leveled.png"));
-        save_debug_image(&leveled, w, h, &output_dir.join("debug_leveled.png"));
-        save_debug_image(&contrast, w, h, &output_dir.join("debug_contrast.png"));
+        let path = output_dir.join(format!("{prefix}_debug_line_leveled.png"));
+        save_debug_image(&line_leveled, w, h, &path);
+        let path = output_dir.join(format!("{prefix}_debug_leveled.png"));
+        save_debug_image(&leveled, w, h, &path);
+        let path = output_dir.join(format!("{prefix}_debug_contrast.png"));
+        save_debug_image(&contrast, w, h, &path);
         println!("Saved debug images to {}", output_dir.display());
     }
 
@@ -567,5 +575,5 @@ pub fn extract_defects(
     );
 
     // Crop from original image — the classifier does its own normalisation
-    crop_and_save(image, &final_defects, crop_size, output_dir);
+    crop_and_save(image, &final_defects, crop_size, output_dir, prefix);
 }

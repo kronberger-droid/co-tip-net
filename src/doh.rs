@@ -276,9 +276,15 @@ fn suppress_duplicates(mut keypoints: Vec<Keypoint>) -> Vec<Keypoint> {
 ///
 /// If `debug` is true, prints noise σ, the σ ladder, per-class counts and
 /// the scale and strength distribution of valid blobs, and saves
-/// `debug_doh.png`: the leveled scan with a circle of radius 2σ per
+/// `<prefix>_debug_doh.png`: the leveled scan with a circle of radius 2σ per
 /// keypoint, colored by class.
-pub fn extract_defects_doh(image: &GrayImage, params: &DohParams, output_dir: &Path, debug: bool) {
+pub fn extract_defects_doh(
+    image: &GrayImage,
+    params: &DohParams,
+    output_dir: &Path,
+    prefix: &str,
+    debug: bool,
+) {
     let (width, height) = image.dimensions();
     let (w, h) = (width as usize, height as usize);
     let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
@@ -299,7 +305,7 @@ pub fn extract_defects_doh(image: &GrayImage, params: &DohParams, output_dir: &P
     if debug {
         print_debug_stats(&det, params);
         std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
-        let path = output_dir.join("debug_doh.png");
+        let path = output_dir.join(format!("{prefix}_debug_doh.png"));
         render_overlay(&det, w, h)
             .save(&path)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
@@ -313,7 +319,7 @@ pub fn extract_defects_doh(image: &GrayImage, params: &DohParams, output_dir: &P
         defects.len()
     );
 
-    crop_and_save(image, &defects, params.crop_size, output_dir);
+    crop_and_save(image, &defects, params.crop_size, output_dir, prefix);
 }
 
 fn print_debug_stats(det: &Detection, params: &DohParams) {

@@ -183,6 +183,12 @@ fn main() {
             let image = image::open(&input)
                 .unwrap_or_else(|e| panic!("Failed to open {}: {e}", input.display()))
                 .into_luma8();
+            // Crops are named after the scan so several scans can share one
+            // output directory.
+            let prefix = input
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "scan".into());
             match method {
                 Method::Peaks => detect::extract_defects(
                     &image,
@@ -191,6 +197,7 @@ fn main() {
                     min_contrast,
                     min_isotropy,
                     &output,
+                    &prefix,
                     debug,
                 ),
                 Method::Flood => {
@@ -203,7 +210,7 @@ fn main() {
                             .unwrap_or_else(|| flood::FloodParams::default_max_area(crop_size)),
                         min_isotropy,
                     };
-                    flood::extract_defects_flood(&image, &params, &output, debug);
+                    flood::extract_defects_flood(&image, &params, &output, &prefix, debug);
                 }
                 Method::Doh => {
                     let params = doh::DohParams {
@@ -216,7 +223,7 @@ fn main() {
                         level_sigma: doh_level,
                         min_isotropy,
                     };
-                    doh::extract_defects_doh(&image, &params, &output, debug);
+                    doh::extract_defects_doh(&image, &params, &output, &prefix, debug);
                 }
             }
         }
