@@ -202,7 +202,7 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
         for y in 1..height - 1 {
             for x in 1..width - 1 {
                 let v = strength[y * width + x];
-                if v < threshold {
+                if v <= 0.0 || v < threshold {
                     continue;
                 }
 
