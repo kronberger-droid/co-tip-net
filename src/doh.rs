@@ -49,13 +49,15 @@ pub struct DohParams {
 }
 
 impl DohParams {
-    /// σ defaults scaled to the crop size, since px/nm differs per scan.
+    /// σ defaults scaled to the crop size. At the default 40 px crop and
+    /// 30 nm / 512 px this is 2-8 px, i.e. 0.12-0.47 nm, which brackets the
+    /// CO dots (σ 1.9-7 px) on the nice Cu reference scans.
     pub fn default_min_sigma(crop_size: u32) -> f32 {
-        crop_size as f32 / 16.0
+        crop_size as f32 / 20.0
     }
 
     pub fn default_max_sigma(crop_size: u32) -> f32 {
-        crop_size as f32 / 6.0
+        crop_size as f32 / 5.0
     }
 
     /// Geometric σ ladder with one padding scale on each end.

@@ -113,11 +113,11 @@ enum Command {
         #[arg(long, default_value_t = 2.0)]
         doh_level: f32,
 
-        /// [doh] Smallest blob σ accepted as a CO, in pixels [default: crop_size/16]
+        /// [doh] Smallest blob σ accepted as a CO, in pixels [default: crop_size/20]
         #[arg(long)]
         min_sigma: Option<f32>,
 
-        /// [doh] Largest blob σ accepted as a CO, in pixels [default: crop_size/6]
+        /// [doh] Largest blob σ accepted as a CO, in pixels [default: crop_size/5]
         #[arg(long)]
         max_sigma: Option<f32>,
 
