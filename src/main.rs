@@ -5,6 +5,9 @@ mod doh;
 mod flood;
 mod model;
 mod preprocess;
+mod scan;
+mod steps;
+mod sxm;
 mod train;
 
 use std::fs;
@@ -44,8 +47,17 @@ enum Command {
 
     /// Extract defect crops from a large scan image
     Extract {
-        /// Path to input scan image (PNG)
+        /// Path to input scan: Nanonis .sxm (Z forward) or a grayscale image
         input: PathBuf,
+
+        /// Pixel scale .sxm scans are resampled to, so crop and blob sizes in
+        /// pixels mean the same physical size across scan ranges. Ignored for images.
+        #[arg(long, default_value_t = scan::DEFAULT_NM_PER_PX)]
+        nm_per_px: f32,
+
+        /// Skip .sxm scans that would need more than this much upsampling
+        #[arg(long, default_value_t = 2.0)]
+        max_upsample: f32,
 
         /// Output directory for cropped patches
         #[arg(long, default_value = "crops")]
@@ -71,8 +83,18 @@ enum Command {
         #[arg(long, default_value_t = 0.3)]
         min_isotropy: f32,
 
-        /// [flood] Water level in units of the robust noise σ below the background
+        /// [flood, doh] Box radius of the background subtracted before detection,
+        /// in pixels. Smaller keeps step edges thin [default: crop_size/3]
+        #[arg(long)]
+        bg_radius: Option<usize>,
+
+        /// [flood, doh] Step-edge mask threshold in robust σ of the height gradient.
+        /// Detections on long strong-gradient lines are rejected. 0 disables
         #[arg(long, default_value_t = 3.0)]
+        step_level: f32,
+
+        /// [flood] Water level in units of the robust noise σ below the background
+        #[arg(long, default_value_t = 2.0)]
         flood_level: f32,
 
         /// [flood] Minimum region area in pixels [default: (crop_size/8)²]
@@ -84,7 +106,7 @@ enum Command {
         max_area: Option<usize>,
 
         /// [doh] Detection threshold in units of the robust noise σ
-        #[arg(long, default_value_t = 4.0)]
+        #[arg(long, default_value_t = 2.0)]
         doh_level: f32,
 
         /// [doh] Smallest blob σ accepted as a CO, in pixels [default: crop_size/16]
@@ -165,12 +187,16 @@ fn main() {
 
         Command::Extract {
             input,
+            nm_per_px,
+            max_upsample,
             output,
             method,
             crop_size,
             contrast_radius,
             min_contrast,
             min_isotropy,
+            bg_radius,
+            step_level,
             flood_level,
             min_area,
             max_area,
@@ -180,18 +206,20 @@ fn main() {
             num_scales,
             debug,
         } => {
-            let image = image::open(&input)
-                .unwrap_or_else(|e| panic!("Failed to open {}: {e}", input.display()))
-                .into_luma8();
+            let scan = scan::Scan::open(&input, nm_per_px, max_upsample).unwrap_or_else(|e| {
+                eprintln!("Skipping {}: {e}", input.display());
+                std::process::exit(1);
+            });
             // Crops are named after the scan so several scans can share one
             // output directory.
             let prefix = input
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "scan".into());
+            let bg_radius = bg_radius.unwrap_or(crop_size as usize / 3);
             match method {
                 Method::Peaks => detect::extract_defects(
-                    &image,
+                    &scan,
                     crop_size,
                     contrast_radius,
                     min_contrast,
@@ -203,6 +231,8 @@ fn main() {
                 Method::Flood => {
                     let params = flood::FloodParams {
                         crop_size,
+                        bg_radius,
+                        step_level,
                         level_sigma: flood_level,
                         min_area: min_area
                             .unwrap_or_else(|| flood::FloodParams::default_min_area(crop_size)),
@@ -210,11 +240,13 @@ fn main() {
                             .unwrap_or_else(|| flood::FloodParams::default_max_area(crop_size)),
                         min_isotropy,
                     };
-                    flood::extract_defects_flood(&image, &params, &output, &prefix, debug);
+                    flood::extract_defects_flood(&scan, &params, &output, &prefix, debug);
                 }
                 Method::Doh => {
                     let params = doh::DohParams {
                         crop_size,
+                        bg_radius,
+                        step_level,
                         min_sigma: min_sigma
                             .unwrap_or_else(|| doh::DohParams::default_min_sigma(crop_size)),
                         max_sigma: max_sigma
@@ -223,7 +255,7 @@ fn main() {
                         level_sigma: doh_level,
                         min_isotropy,
                     };
-                    doh::extract_defects_doh(&image, &params, &output, &prefix, debug);
+                    doh::extract_defects_doh(&scan, &params, &output, &prefix, debug);
                 }
             }
         }

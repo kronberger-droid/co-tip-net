@@ -15,14 +15,20 @@
 
 use std::path::Path;
 
-use image::{GrayImage, Rgb, RgbImage};
+use image::{Rgb, RgbImage};
 
-use crate::detect::{Defect, crop_and_save, level_gaussian_bg, level_line_median};
+use crate::detect::{Defect, crop_and_save, level_line_median, level_robust_bg};
+use crate::scan::Scan;
+use crate::steps::{step_mask, unmasked_sigma};
 
 /// Parameters for flood-based extraction.
 pub struct FloodParams {
     /// Side length of the square crop around each valid region (pixels).
     pub crop_size: u32,
+    /// Box radius of the background subtracted before flooding (pixels).
+    pub bg_radius: usize,
+    /// Step-edge mask threshold in robust σ of the gradient, `<= 0` disables.
+    pub step_level: f32,
     /// Water level in units of the robust noise σ: pixels with
     /// `leveled < -level_sigma * σ` are submerged.
     pub level_sigma: f32,
@@ -53,15 +59,17 @@ pub enum RegionClass {
     TooLarge,
     Elongated,
     CloseToEdge,
+    StepEdge,
 }
 
 impl RegionClass {
-    pub(crate) const ALL: [RegionClass; 5] = [
+    pub(crate) const ALL: [RegionClass; 6] = [
         RegionClass::Valid,
         RegionClass::TooSmall,
         RegionClass::TooLarge,
         RegionClass::Elongated,
         RegionClass::CloseToEdge,
+        RegionClass::StepEdge,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -71,6 +79,7 @@ impl RegionClass {
             RegionClass::TooLarge => "too large",
             RegionClass::Elongated => "elongated",
             RegionClass::CloseToEdge => "close to edge",
+            RegionClass::StepEdge => "step edge",
         }
     }
 
@@ -82,6 +91,7 @@ impl RegionClass {
             RegionClass::TooLarge => [40, 60, 220],
             RegionClass::Elongated => [210, 60, 210],
             RegionClass::CloseToEdge => [240, 150, 30],
+            RegionClass::StepEdge => [230, 220, 40],
         }
     }
 }
@@ -119,6 +129,10 @@ pub fn robust_sigma(data: &[f32]) -> f32 {
     }
     let mean = data.iter().sum::<f32>() / data.len() as f32;
     (data.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / data.len() as f32).sqrt()
+}
+
+pub fn median(data: &[f32]) -> f32 {
+    median_in_place(&mut data.to_vec())
 }
 
 fn median_in_place(buf: &mut [f32]) -> f32 {
@@ -218,10 +232,20 @@ fn region_stats(pixels: Vec<usize>, leveled: &[f32], width: usize, height: usize
     }
 }
 
-pub fn classify(region: &Region, params: &FloodParams, width: usize, height: usize) -> RegionClass {
+pub fn classify(
+    region: &Region,
+    params: &FloodParams,
+    width: usize,
+    height: usize,
+    step_mask: &[bool],
+) -> RegionClass {
     let area = region.pixels.len();
     if area < params.min_area {
         return RegionClass::TooSmall;
+    }
+    let (cx, cy) = (region.centroid.0.round(), region.centroid.1.round());
+    if step_mask[cy as usize * width + cx as usize] {
+        return RegionClass::StepEdge;
     }
     if area > params.max_area {
         return RegionClass::TooLarge;
@@ -231,11 +255,7 @@ pub fn classify(region: &Region, params: &FloodParams, width: usize, height: usi
     }
 
     let half = (params.crop_size / 2) as f32;
-    let (cx, cy) = region.centroid;
-    let fits = cx.round() >= half
-        && cy.round() >= half
-        && cx.round() + half < width as f32
-        && cy.round() + half < height as f32;
+    let fits = cx >= half && cy >= half && cx + half < width as f32 && cy + half < height as f32;
     if region.touches_border || !fits {
         return RegionClass::CloseToEdge;
     }
@@ -256,13 +276,22 @@ pub fn segment(pixels: &[f32], width: usize, height: usize, params: &FloodParams
     // Row median removes scan-line offsets, then a 2D background much wider
     // than a molecule removes slow gradients.
     let line_leveled = level_line_median(pixels, width, height);
-    let leveled = level_gaussian_bg(&line_leveled, width, height, params.crop_size as usize);
+    let leveled = level_robust_bg(&line_leveled, width, height, params.bg_radius);
+    let mask = step_mask(
+        &line_leveled,
+        width,
+        height,
+        params.step_level,
+        params.crop_size as usize,
+        params.crop_size as usize / 4,
+    );
 
-    let sigma = robust_sigma(&leveled);
+    // Steps would dominate the spread, thus noise comes from the rest.
+    let sigma = unmasked_sigma(&leveled, &mask);
     let regions = flood_regions(&leveled, width, height, params.level_sigma * sigma)
         .into_iter()
         .map(|r| {
-            let class = classify(&r, params, width, height);
+            let class = classify(&r, params, width, height, &mask);
             (r, class)
         })
         .collect();
@@ -280,17 +309,14 @@ pub fn segment(pixels: &[f32], width: usize, height: usize, params: &FloodParams
 /// and saves `<prefix>_debug_flood.png`: the leveled scan with regions
 /// colored by class and a cross on each valid centroid.
 pub fn extract_defects_flood(
-    image: &GrayImage,
+    scan: &Scan,
     params: &FloodParams,
     output_dir: &Path,
     prefix: &str,
     debug: bool,
 ) {
-    let (width, height) = image.dimensions();
-    let (w, h) = (width as usize, height as usize);
-    let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
-
-    let seg = segment(&pixels, w, h, params);
+    let (w, h) = (scan.width, scan.height);
+    let seg = segment(&scan.data, w, h, params);
 
     let defects: Vec<Defect> = seg
         .regions
@@ -313,14 +339,17 @@ pub fn extract_defects_flood(
         println!("Saved {}", path.display());
     }
 
-    println!(
-        "Image {}x{}: found {} defects",
-        width,
-        height,
-        defects.len()
-    );
+    println!("Image {w}x{h}: found {} defects", defects.len());
 
-    crop_and_save(image, &defects, params.crop_size, output_dir, prefix);
+    crop_and_save(
+        &seg.leveled,
+        w,
+        h,
+        &defects,
+        params.crop_size,
+        output_dir,
+        prefix,
+    );
 }
 
 fn print_debug_stats(seg: &Segmentation, params: &FloodParams) {
@@ -453,6 +482,8 @@ mod tests {
     fn params() -> FloodParams {
         FloodParams {
             crop_size: CROP,
+            bg_radius: CROP as usize,
+            step_level: 6.0,
             level_sigma: 3.0,
             min_area: FloodParams::default_min_area(CROP),
             max_area: FloodParams::default_max_area(CROP),

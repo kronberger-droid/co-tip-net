@@ -15,15 +15,21 @@
 
 use std::path::Path;
 
-use image::{GrayImage, Rgb, RgbImage};
+use image::{Rgb, RgbImage};
 
-use crate::detect::{Defect, crop_and_save, level_gaussian_bg, level_line_median};
-use crate::flood::{RegionClass, robust_sigma};
+use crate::detect::{Defect, crop_and_save, level_line_median, level_robust_bg};
+use crate::flood::RegionClass;
+use crate::scan::Scan;
+use crate::steps::{step_mask, unmasked_sigma};
 
 /// Parameters for DoH extraction.
 pub struct DohParams {
     /// Side length of the square crop around each valid blob (pixels).
     pub crop_size: u32,
+    /// Box radius of the background subtracted before detection (pixels).
+    pub bg_radius: usize,
+    /// Step-edge mask threshold in robust σ of the gradient, `<= 0` disables.
+    pub step_level: f32,
     /// Smallest blob σ accepted as a CO (pixels).
     pub min_sigma: f32,
     /// Largest blob σ accepted as a CO (pixels).
@@ -173,13 +179,23 @@ pub struct Detection {
     pub sigma: f32,
     pub ladder: Vec<f32>,
     pub keypoints: Vec<Keypoint>,
+    pub step_mask: Vec<bool>,
 }
 
 /// Level the raw scan, build the DoH scale space and classify its maxima.
 pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -> Detection {
     let line_leveled = level_line_median(pixels, width, height);
-    let leveled = level_gaussian_bg(&line_leveled, width, height, params.crop_size as usize);
-    let noise = robust_sigma(&leveled);
+    let leveled = level_robust_bg(&line_leveled, width, height, params.bg_radius);
+    let mask = step_mask(
+        &line_leveled,
+        width,
+        height,
+        params.step_level,
+        params.crop_size as usize,
+        params.crop_size as usize / 4,
+    );
+    // Steps would dominate the spread, thus noise comes from the rest.
+    let noise = unmasked_sigma(&leveled, &mask);
     let threshold = params.level_sigma * noise;
     let ladder = params.ladder();
 
@@ -221,7 +237,9 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
 
                 let iso = isotropy[y * width + x];
                 let fits = x >= half && y >= half && x + half < width && y + half < height;
-                let class = if si == 0 {
+                let class = if mask[y * width + x] {
+                    RegionClass::StepEdge
+                } else if si == 0 {
                     RegionClass::TooSmall
                 } else if si == last {
                     RegionClass::TooLarge
@@ -250,6 +268,7 @@ pub fn detect(pixels: &[f32], width: usize, height: usize, params: &DohParams) -
         sigma: noise,
         ladder,
         keypoints: suppress_duplicates(keypoints),
+        step_mask: mask,
     }
 }
 
@@ -277,19 +296,16 @@ fn suppress_duplicates(mut keypoints: Vec<Keypoint>) -> Vec<Keypoint> {
 /// If `debug` is true, prints noise σ, the σ ladder, per-class counts and
 /// the scale and strength distribution of valid blobs, and saves
 /// `<prefix>_debug_doh.png`: the leveled scan with a circle of radius 2σ per
-/// keypoint, colored by class.
+/// keypoint, colored by class, and the step mask tinted yellow.
 pub fn extract_defects_doh(
-    image: &GrayImage,
+    scan: &Scan,
     params: &DohParams,
     output_dir: &Path,
     prefix: &str,
     debug: bool,
 ) {
-    let (width, height) = image.dimensions();
-    let (w, h) = (width as usize, height as usize);
-    let pixels: Vec<f32> = image.pixels().map(|p| p.0[0] as f32).collect();
-
-    let det = detect(&pixels, w, h, params);
+    let (w, h) = (scan.width, scan.height);
+    let det = detect(&scan.data, w, h, params);
 
     let defects: Vec<Defect> = det
         .keypoints
@@ -312,14 +328,17 @@ pub fn extract_defects_doh(
         println!("Saved {}", path.display());
     }
 
-    println!(
-        "Image {}x{}: found {} defects",
-        width,
-        height,
-        defects.len()
-    );
+    println!("Image {w}x{h}: found {} defects", defects.len());
 
-    crop_and_save(image, &defects, params.crop_size, output_dir, prefix);
+    crop_and_save(
+        &det.leveled,
+        w,
+        h,
+        &defects,
+        params.crop_size,
+        output_dir,
+        prefix,
+    );
 }
 
 fn print_debug_stats(det: &Detection, params: &DohParams) {
@@ -383,10 +402,20 @@ fn render_overlay(det: &Detection, width: usize, height: usize) -> RgbImage {
     let mut img = RgbImage::from_fn(width as u32, height as u32, |x, y| {
         let v = det.leveled[y as usize * width + x as usize];
         let g = ((v - min) / range * 255.0) as u8;
-        Rgb([g, g, g])
+        if det.step_mask[y as usize * width + x as usize] {
+            // Tint the mask instead of drawing its many keypoints.
+            let [r, gr, b] = RegionClass::StepEdge.color();
+            let mix = |c: u8| ((g as u16 + c as u16) / 2) as u8;
+            Rgb([mix(r), mix(gr), mix(b)])
+        } else {
+            Rgb([g, g, g])
+        }
     });
 
     for kp in &det.keypoints {
+        if kp.class == RegionClass::StepEdge {
+            continue;
+        }
         let color = Rgb(kp.class.color());
         let r = 2.0 * kp.sigma;
         let steps = (2.0 * std::f32::consts::PI * r).ceil() as usize * 2;
@@ -438,6 +467,8 @@ mod tests {
     fn params() -> DohParams {
         DohParams {
             crop_size: CROP,
+            bg_radius: CROP as usize,
+            step_level: 6.0,
             min_sigma: DohParams::default_min_sigma(CROP),
             max_sigma: DohParams::default_max_sigma(CROP),
             num_scales: 6,
