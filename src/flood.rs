@@ -194,7 +194,11 @@ fn region_stats(pixels: Vec<usize>, leveled: &[f32], width: usize, height: usize
     let lambda_max = (trace + disc) / 2.0;
     let lambda_min = (trace - disc) / 2.0;
     // A single pixel has zero spread; call it round and let area decide.
-    let isotropy = if lambda_max < 1e-9 { 1.0 } else { lambda_min / lambda_max };
+    let isotropy = if lambda_max < 1e-9 {
+        1.0
+    } else {
+        lambda_min / lambda_max
+    };
 
     Region {
         pixels,
@@ -299,7 +303,12 @@ pub fn extract_defects_flood(
         println!("Saved {}", path.display());
     }
 
-    println!("Image {}x{}: found {} defects", width, height, defects.len());
+    println!(
+        "Image {}x{}: found {} defects",
+        width,
+        height,
+        defects.len()
+    );
 
     crop_and_save(image, &defects, params.crop_size, output_dir);
 }
@@ -338,7 +347,11 @@ fn print_debug_stats(seg: &Segmentation, params: &FloodParams) {
 
 fn render_overlay(seg: &Segmentation, width: usize, height: usize) -> RgbImage {
     let min = seg.leveled.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max = seg.leveled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let max = seg
+        .leveled
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
     let range = (max - min).max(1e-9);
 
     let mut img = RgbImage::from_fn(width as u32, height as u32, |x, y| {
@@ -361,7 +374,10 @@ fn render_overlay(seg: &Segmentation, width: usize, height: usize) -> RgbImage {
         if *class != RegionClass::Valid {
             continue;
         }
-        let (cx, cy) = (region.centroid.0.round() as i64, region.centroid.1.round() as i64);
+        let (cx, cy) = (
+            region.centroid.0.round() as i64,
+            region.centroid.1.round() as i64,
+        );
         for d in -3..=3_i64 {
             for (x, y) in [(cx + d, cy), (cx, cy + d)] {
                 if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
