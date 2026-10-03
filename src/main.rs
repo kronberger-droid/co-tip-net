@@ -1,6 +1,7 @@
 mod batcher;
 mod dataset;
 mod detect;
+mod flood;
 mod model;
 mod preprocess;
 mod train;
@@ -49,15 +50,19 @@ enum Command {
         #[arg(long, default_value = "crops")]
         output: PathBuf,
 
+        /// Detection method
+        #[arg(long, value_enum, default_value_t = Method::Peaks)]
+        method: Method,
+
         /// Crop size in pixels (before resize to 16x16)
         #[arg(long, default_value_t = 40)]
         crop_size: u32,
 
-        /// Radius for local contrast computation (pixels)
+        /// [peaks] Radius for local contrast computation (pixels)
         #[arg(long, default_value_t = 20)]
         contrast_radius: usize,
 
-        /// Minimum contrast threshold for detection
+        /// [peaks] Minimum contrast threshold for detection
         #[arg(long, default_value_t = 10.0)]
         min_contrast: f32,
 
@@ -65,7 +70,19 @@ enum Command {
         #[arg(long, default_value_t = 0.3)]
         min_isotropy: f32,
 
-        /// Save intermediate debug images (leveled, contrast map) to output dir.
+        /// [flood] Water level in units of the robust noise σ below the background
+        #[arg(long, default_value_t = 3.0)]
+        flood_level: f32,
+
+        /// [flood] Minimum region area in pixels [default: (crop_size/8)²]
+        #[arg(long)]
+        min_area: Option<usize>,
+
+        /// [flood] Maximum region area in pixels [default: (crop_size/2)²]
+        #[arg(long)]
+        max_area: Option<usize>,
+
+        /// Save intermediate debug images (leveled, contrast map, flood overlay) to output dir.
         #[arg(long, default_value_t = false)]
         debug: bool,
     },
@@ -88,6 +105,14 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Freeze::None)]
         freeze: Freeze,
     },
+}
+
+#[derive(Clone, ValueEnum)]
+enum Method {
+    /// Local contrast peaks filtered by shape heuristics
+    Peaks,
+    /// Flood below the background and classify connected regions by size and shape
+    Flood,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -122,24 +147,42 @@ fn main() {
         Command::Extract {
             input,
             output,
+            method,
             crop_size,
             contrast_radius,
             min_contrast,
             min_isotropy,
+            flood_level,
+            min_area,
+            max_area,
             debug,
         } => {
             let image = image::open(&input)
                 .unwrap_or_else(|e| panic!("Failed to open {}: {e}", input.display()))
                 .into_luma8();
-            detect::extract_defects(
-                &image,
-                crop_size,
-                contrast_radius,
-                min_contrast,
-                min_isotropy,
-                &output,
-                debug,
-            );
+            match method {
+                Method::Peaks => detect::extract_defects(
+                    &image,
+                    crop_size,
+                    contrast_radius,
+                    min_contrast,
+                    min_isotropy,
+                    &output,
+                    debug,
+                ),
+                Method::Flood => {
+                    let params = flood::FloodParams {
+                        crop_size,
+                        level_sigma: flood_level,
+                        min_area: min_area
+                            .unwrap_or_else(|| flood::FloodParams::default_min_area(crop_size)),
+                        max_area: max_area
+                            .unwrap_or_else(|| flood::FloodParams::default_max_area(crop_size)),
+                        min_isotropy,
+                    };
+                    flood::extract_defects_flood(&image, &params, &output, debug);
+                }
+            }
         }
 
         Command::Train {
