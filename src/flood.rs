@@ -56,7 +56,7 @@ pub enum RegionClass {
 }
 
 impl RegionClass {
-    const ALL: [RegionClass; 5] = [
+    pub(crate) const ALL: [RegionClass; 5] = [
         RegionClass::Valid,
         RegionClass::TooSmall,
         RegionClass::TooLarge,
@@ -64,7 +64,7 @@ impl RegionClass {
         RegionClass::CloseToEdge,
     ];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             RegionClass::Valid => "valid",
             RegionClass::TooSmall => "too small",
@@ -75,7 +75,7 @@ impl RegionClass {
     }
 
     /// Overlay color, roughly following the poster's legend.
-    fn color(self) -> [u8; 3] {
+    pub(crate) fn color(self) -> [u8; 3] {
         match self {
             RegionClass::Valid => [40, 200, 60],
             RegionClass::TooSmall => [80, 200, 230],
@@ -277,12 +277,13 @@ pub fn segment(pixels: &[f32], width: usize, height: usize, params: &FloodParams
 /// Full extraction pipeline: level → flood → classify → crop valid regions.
 ///
 /// If `debug` is true, prints σ, per-class counts and the area distribution,
-/// and saves `debug_flood.png`: the leveled scan with regions colored by class
-/// and a cross on each valid centroid.
+/// and saves `<prefix>_debug_flood.png`: the leveled scan with regions
+/// colored by class and a cross on each valid centroid.
 pub fn extract_defects_flood(
     image: &GrayImage,
     params: &FloodParams,
     output_dir: &Path,
+    prefix: &str,
     debug: bool,
 ) {
     let (width, height) = image.dimensions();
@@ -305,7 +306,7 @@ pub fn extract_defects_flood(
     if debug {
         print_debug_stats(&seg, params);
         std::fs::create_dir_all(output_dir).expect("Failed to create output directory");
-        let path = output_dir.join("debug_flood.png");
+        let path = output_dir.join(format!("{prefix}_debug_flood.png"));
         render_overlay(&seg, w, h)
             .save(&path)
             .unwrap_or_else(|e| panic!("Failed to save {}: {e}", path.display()));
@@ -319,7 +320,7 @@ pub fn extract_defects_flood(
         defects.len()
     );
 
-    crop_and_save(image, &defects, params.crop_size, output_dir);
+    crop_and_save(image, &defects, params.crop_size, output_dir, prefix);
 }
 
 fn print_debug_stats(seg: &Segmentation, params: &FloodParams) {
